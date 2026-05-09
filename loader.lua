@@ -129,6 +129,17 @@ local State = {
     Loaded = true,
 }
 
+local MenuBox = Tabs.Settings:AddLeftGroupbox("Menu", "settings")
+
+MenuBox:AddLabel("Menu keybind"):AddKeyPicker("MenuKeybind", {
+    Text = "Menu keybind",
+    Default = "RightControl",
+    Mode = "Toggle",
+    SyncToggleState = false,
+})
+
+Library.ToggleKeybind = Options.MenuKeybind
+
 -- Add your own game services/remotes here.
 -- local ReplicatedStorage = game:GetService("ReplicatedStorage")
 -- local Events = ReplicatedStorage:WaitForChild("Events")
