@@ -1,21 +1,48 @@
-local Repo = "https://raw.githubusercontent.com/zTonho/voidra-BW/refs/heads/main/"
+local Repo = "https://raw.githubusercontent.com/zTonho/voidra-bridgerwestern/refs/heads/main/"
+local ObsidianRepo = "https://raw.githubusercontent.com/deividcomsono/Obsidian/refs/heads/main/"
 local CacheToken = tostring(os.time())
 
-local function fetch(path)
-    local url = Repo .. path .. "?v=" .. CacheToken
+local function fetchFrom(repo, path)
+    local url = repo .. path .. "?v=" .. CacheToken
     local ok, result = pcall(function()
         return game:HttpGet(url)
     end)
 
-    if not ok then
-        error(("[voidra] Failed to fetch %s: %s"):format(path, tostring(result)), 2)
+    return ok, result, url
+end
+
+local function isBadResponse(result)
+    return type(result) ~= "string"
+        or result == ""
+        or result:match("^404")
+        or result:find("404: Not Found", 1, true) ~= nil
+end
+
+local function fetch(path)
+    local ok, result, url = fetchFrom(Repo, path)
+
+    if ok and not isBadResponse(result) then
+        return result
     end
 
-    if type(result) ~= "string" or result == "" then
-        error(("[voidra] Empty response while fetching %s"):format(path), 2)
+    local primaryError = ok and result or tostring(result)
+    local fallbackOk, fallbackResult, fallbackUrl = fetchFrom(ObsidianRepo, path)
+
+    if fallbackOk and not isBadResponse(fallbackResult) then
+        warn(("[voidra] %s was not found in your repo. Loaded fallback from Obsidian official repo."):format(path))
+        return fallbackResult
     end
 
-    return result
+    error(
+        ("[voidra] Failed to fetch %s.\nPrimary: %s -> %s\nFallback: %s -> %s"):format(
+            path,
+            url,
+            tostring(primaryError),
+            fallbackUrl,
+            tostring(fallbackResult)
+        ),
+        2
+    )
 end
 
 local function run(path)
