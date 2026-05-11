@@ -165,11 +165,16 @@ MenuBox:AddLabel("Menu keybind"):AddKeyPicker("MenuKeybind", {
 
 Library.ToggleKeybind = Options.MenuKeybind
 
+local cleanup = function() end
+
+local MovementOk, MovementError = pcall(function()
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local LocalPlayer = Players.LocalPlayer or Players.PlayerAdded:Wait()
 local MovementState = State.Movement
+local ZeroVector = Vector3.new(0, 0, 0)
+local UpVector = Vector3.new(0, 1, 0)
 
 local function notify(description)
     Library:Notify({
@@ -379,7 +384,7 @@ local function ensureFlyMovers()
         local velocity = Instance.new("BodyVelocity")
         velocity.Name = "VoidraFlyVelocity"
         velocity.MaxForce = Vector3.new(1, 1, 1) * 1000000
-        velocity.Velocity = Vector3.zero
+        velocity.Velocity = ZeroVector
         velocity.Parent = root
 
         local gyro = Instance.new("BodyGyro")
@@ -400,40 +405,40 @@ local function getFlyDirection()
     local camera = workspace.CurrentCamera
 
     if not camera then
-        return Vector3.zero
+        return ZeroVector
     end
 
-    local direction = Vector3.zero
+    local direction = ZeroVector
 
     if UserInputService:IsKeyDown(Enum.KeyCode.W) then
-        direction += camera.CFrame.LookVector
+        direction = direction + camera.CFrame.LookVector
     end
 
     if UserInputService:IsKeyDown(Enum.KeyCode.S) then
-        direction -= camera.CFrame.LookVector
+        direction = direction - camera.CFrame.LookVector
     end
 
     if UserInputService:IsKeyDown(Enum.KeyCode.A) then
-        direction -= camera.CFrame.RightVector
+        direction = direction - camera.CFrame.RightVector
     end
 
     if UserInputService:IsKeyDown(Enum.KeyCode.D) then
-        direction += camera.CFrame.RightVector
+        direction = direction + camera.CFrame.RightVector
     end
 
     if UserInputService:IsKeyDown(Enum.KeyCode.Space) then
-        direction += Vector3.yAxis
+        direction = direction + UpVector
     end
 
     if UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then
-        direction -= Vector3.yAxis
+        direction = direction - UpVector
     end
 
     if direction.Magnitude > 0 then
         return direction.Unit
     end
 
-    return Vector3.zero
+    return ZeroVector
 end
 
 local function setFlyEnabled(enabled)
@@ -478,7 +483,7 @@ local CharacterAddedConnection = LocalPlayer.CharacterAdded:Connect(function()
     end
 end)
 
-local function cleanup()
+cleanup = function()
     setWalkSpeedEnabled(false)
     setInfJumpEnabled(false)
     setNoclipEnabled(false)
@@ -672,6 +677,16 @@ Toggles.MovementFly:OnChanged(setFlyEnabled)
 Options.MovementFlySpeed:OnChanged(function(value)
     MovementState.FlySpeed = value
 end)
+end)
+
+if not MovementOk then
+    warn("[voidra] Movement setup failed: " .. tostring(MovementError))
+    Library:Notify({
+        Title = "voidra",
+        Description = "Movement setup failed. Check console.",
+        Time = 5,
+    })
+end
 
 -- Add your own game services/remotes here.
 -- local ReplicatedStorage = game:GetService("ReplicatedStorage")
