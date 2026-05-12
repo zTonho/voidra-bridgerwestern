@@ -120,6 +120,8 @@ local Window = Library:CreateWindow({
     AutoShow = true,
     Center = true,
     Resizable = false,
+    EnableSidebarResize = false,
+    EnableCompacting = false,
     NotifySide = "Left",
     ShowCustomCursor = true,
 })
