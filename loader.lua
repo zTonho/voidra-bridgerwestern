@@ -117,7 +117,7 @@ Loading:SetCurrentStep(4)
 local Window = Library:CreateWindow({
     Title = "voidra",
     Footer = "voidra",
-    Icon = "rbxassetid://138460014725075",
+    Icon = "rbxassetid://112887553118483",
     IconSize = UDim2.fromOffset(20, 20),
     Font = Enum.Font.RobotoMono,
     AutoShow = true,
