@@ -140,6 +140,15 @@ local Tabs = {
 
 local State = {
     Loaded = true,
+    Main = {
+        Godmode = false,
+        GodHealth = 1000000,
+        Connection = nil,
+        HealthConnection = nil,
+        Humanoid = nil,
+        OriginalMaxHealth = nil,
+        OriginalBreakJointsOnDeath = nil,
+    },
     Mining = {
         SelectedOre = "Copper",
         AutoFarm = false,
@@ -697,6 +706,139 @@ if not MovementOk then
     Library:Notify({
         Title = "voidra",
         Description = "Movement setup failed. Check console.",
+        Time = 5,
+    })
+end
+
+local MainOk, MainError = pcall(function()
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local LocalPlayer = Players.LocalPlayer or Players.PlayerAdded:Wait()
+local MainState = State.Main
+
+local function getCharacter()
+    return LocalPlayer.Character
+end
+
+local function getHumanoid()
+    local character = getCharacter()
+    return character and character:FindFirstChildOfClass("Humanoid")
+end
+
+local function disconnectHealthWatcher()
+    if MainState.HealthConnection then
+        MainState.HealthConnection:Disconnect()
+        MainState.HealthConnection = nil
+    end
+end
+
+local function rememberHumanoid(humanoid)
+    if MainState.Humanoid == humanoid then
+        return
+    end
+
+    disconnectHealthWatcher()
+    MainState.Humanoid = humanoid
+    MainState.OriginalMaxHealth = humanoid.MaxHealth
+
+    local ok, breakJoints = pcall(function()
+        return humanoid.BreakJointsOnDeath
+    end)
+
+    MainState.OriginalBreakJointsOnDeath = ok and breakJoints or nil
+end
+
+local function fillHumanoidHealth()
+    local humanoid = getHumanoid()
+
+    if not MainState.Godmode or not humanoid then
+        return
+    end
+
+    rememberHumanoid(humanoid)
+
+    pcall(function()
+        humanoid.BreakJointsOnDeath = false
+    end)
+
+    if humanoid.MaxHealth < MainState.GodHealth then
+        humanoid.MaxHealth = MainState.GodHealth
+    end
+
+    if humanoid.Health < humanoid.MaxHealth then
+        humanoid.Health = humanoid.MaxHealth
+    end
+
+    if not MainState.HealthConnection then
+        MainState.HealthConnection = humanoid.HealthChanged:Connect(function()
+            if MainState.Godmode and humanoid.Parent and humanoid.Health < humanoid.MaxHealth then
+                humanoid.Health = humanoid.MaxHealth
+            end
+        end)
+    end
+end
+
+local function restoreHumanoid()
+    local humanoid = MainState.Humanoid
+
+    disconnectHealthWatcher()
+
+    if humanoid and humanoid.Parent then
+        if MainState.OriginalMaxHealth then
+            humanoid.MaxHealth = MainState.OriginalMaxHealth
+            humanoid.Health = math.min(humanoid.Health, humanoid.MaxHealth)
+        end
+
+        if MainState.OriginalBreakJointsOnDeath ~= nil then
+            pcall(function()
+                humanoid.BreakJointsOnDeath = MainState.OriginalBreakJointsOnDeath
+            end)
+        end
+    end
+
+    MainState.Humanoid = nil
+    MainState.OriginalMaxHealth = nil
+    MainState.OriginalBreakJointsOnDeath = nil
+end
+
+local function setHumanoidGodmode(enabled)
+    MainState.Godmode = enabled
+
+    if MainState.Connection then
+        MainState.Connection:Disconnect()
+        MainState.Connection = nil
+    end
+
+    if not enabled then
+        restoreHumanoid()
+        return
+    end
+
+    fillHumanoidHealth()
+    MainState.Connection = RunService.Heartbeat:Connect(fillHumanoidHealth)
+end
+
+local CharacterBox = Tabs.Main:AddLeftGroupbox("Character", "shield")
+
+CharacterBox:AddToggle("MainHumanoidGodmode", {
+    Text = "Humanoid godmode",
+    Default = false,
+})
+
+Toggles.MainHumanoidGodmode:OnChanged(setHumanoidGodmode)
+
+local previousCleanup = cleanup
+cleanup = function()
+    previousCleanup()
+    setHumanoidGodmode(false)
+end
+end)
+
+if not MainOk then
+    warn("[voidra] Main setup failed: " .. tostring(MainError))
+    Library:Notify({
+        Title = "voidra",
+        Description = "Main setup failed. Check console.",
         Time = 5,
     })
 end
