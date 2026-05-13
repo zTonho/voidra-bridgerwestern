@@ -726,6 +726,8 @@ local MiningDropWaitTimeout = 0.25
 local MiningDropPollDelay = 0.02
 local MiningTargetSettleDelay = 0.03
 local MiningAttackResultDelay = 0.08
+local MiningOreLoadTimeout = 2
+local MiningOreLoadPollDelay = 0.05
 local MiningBaseDropHeight = 1.75
 local MiningDropSpacing = 5
 local MiningDropMaxColumns = 7
@@ -1363,25 +1365,32 @@ local function setToolInput(active, pickaxe)
     end
 end
 
-local function addOreTarget(targets, ore, target)
-    if targets.Seen and targets.Seen[target] then
+local function getOrePivotPosition(ore)
+    return getPosition(ore)
+end
+
+local function addOreTarget(targets, ore, target, position)
+    local key = target or ore
+
+    if targets.Seen and targets.Seen[key] then
         return
     end
 
-    local position = getPosition(target)
+    position = position or getPosition(target) or getOrePivotPosition(ore)
 
     if not position then
         return
     end
 
     if targets.Seen then
-        targets.Seen[target] = true
+        targets.Seen[key] = true
     end
 
     targets[#targets + 1] = {
         Ore = ore,
         Target = target,
         HitPosition = position,
+        PivotPosition = getOrePivotPosition(ore) or position,
     }
 end
 
@@ -1410,14 +1419,15 @@ local function findOreTarget(ore)
 end
 
 local function isOreAlive(ore)
-    return ore and ore.Parent == getOresFolder() and findOreTarget(ore) ~= nil
+    return ore and ore.Parent == getOresFolder() and getOrePivotPosition(ore) ~= nil
 end
 
 local function collectTargetsFromOre(targets, ore)
     local target = findOreTarget(ore)
+    local position = target and getPosition(target) or getOrePivotPosition(ore)
 
-    if target then
-        addOreTarget(targets, ore, target)
+    if position then
+        addOreTarget(targets, ore, target, position)
     end
 end
 
@@ -1802,7 +1812,7 @@ local function sellBaseOres()
     task.wait(0.2)
 
     if talkToSellary() then
-        miningNotify(("Sell request sent for %d ore blocks."):format(moved))
+        miningNotify("Ore sold successfully.")
     else
         miningWarn("Could not talk to Nova Sellary.")
     end
@@ -1874,28 +1884,39 @@ local function canContinueMining(stopWhenToggleOff)
     return true
 end
 
-local function refreshOreEntry(entry)
+local function refreshOreEntry(entry, allowPivotOnly)
     if not entry or not entry.Ore or not entry.Ore.Parent then
         return false
     end
 
     local target = findOreTarget(entry.Ore)
-    if not target or not target.Parent then
-        return false
+    if target and target.Parent then
+        local position = getPosition(target)
+
+        if position then
+            entry.Target = target
+            entry.HitPosition = position
+            entry.PivotPosition = getOrePivotPosition(entry.Ore) or position
+            return true
+        end
     end
 
-    local position = getPosition(target)
-    if not position then
-        return false
+    if allowPivotOnly then
+        local position = getOrePivotPosition(entry.Ore)
+
+        if position then
+            entry.Target = nil
+            entry.HitPosition = position
+            entry.PivotPosition = position
+            return true
+        end
     end
 
-    entry.Target = target
-    entry.HitPosition = position
-    return true
+    return false
 end
 
 local function mineTarget(entry, stopWhenToggleOff, stopOnUnequip)
-    if not refreshOreEntry(entry) then
+    if not refreshOreEntry(entry, true) then
         return false
     end
 
@@ -1950,63 +1971,85 @@ local function mineTarget(entry, stopWhenToggleOff, stopOnUnequip)
     local hits = 0
     local dropOrigin = entry.HitPosition
     local chargeMisses = 0
+    local oreLoadStarted = os.clock()
 
-    while canContinueMining(stopWhenToggleOff) and hits < MiningMaxHitsPerOre and isOreAlive(entry.Ore) and refreshOreEntry(entry) do
+    while canContinueMining(stopWhenToggleOff) and hits < MiningMaxHitsPerOre and isOreAlive(entry.Ore) and refreshOreEntry(entry, true) do
         if shouldStopForUnequip() then
             miningNotify("Get ore stopped: pickaxe unequipped.")
             break
         end
 
-        teleportNear(entry.HitPosition)
-        dropOrigin = entry.HitPosition
-        task.wait(MiningTargetSettleDelay)
-
-        if shouldStopForUnequip() then
-            miningNotify("Get ore stopped: pickaxe unequipped.")
-            break
-        end
-
-        ChargeRemote:FireServer({
-            Target = entry.Target,
-            HitPosition = entry.HitPosition,
-        })
-
-        if not waitForChargeGui() then
-            miningWarn("Charge did not start. Pickaxe may be on cooldown.")
-            task.wait(MiningCooldownDelay)
-            chargeMisses = chargeMisses + 1
-
-            if chargeMisses >= maxChargeMisses then
-                if stopOnUnequip then
-                    miningNotify("Get ore stopped: charge did not start.")
-                end
-
+        if not entry.Target then
+            if hits > 0 then
                 break
             end
-        else
-            chargeMisses = 0
 
-            task.wait(MiningChargeTime)
+            teleportNear(entry.HitPosition)
+
+            if os.clock() - oreLoadStarted >= MiningOreLoadTimeout then
+                miningWarn("Ore did not load. Moving to the next ore.")
+                break
+            end
+
+            task.wait(MiningOreLoadPollDelay)
+        else
+            oreLoadStarted = os.clock()
+            teleportNear(entry.HitPosition)
+            dropOrigin = entry.HitPosition
+            task.wait(MiningTargetSettleDelay)
 
             if shouldStopForUnequip() then
                 miningNotify("Get ore stopped: pickaxe unequipped.")
                 break
             end
 
-            AttackRemote:FireServer({
-                Alpha = 1,
-                ResponseTime = MiningChargeTime,
+            ChargeRemote:FireServer({
+                Target = entry.Target,
+                HitPosition = entry.HitPosition,
             })
 
-            task.wait(MiningAttackResultDelay)
+            if not waitForChargeGui() then
+                miningWarn("Charge did not start. Pickaxe may be on cooldown.")
+                task.wait(MiningCooldownDelay)
+                chargeMisses = chargeMisses + 1
 
-            if hasTierWarningGui(entry.HitPosition) then
-                miningNotify("Pickaxe is too weak for this ore.")
-                break
+                if chargeMisses >= maxChargeMisses then
+                    if stopOnUnequip then
+                        miningNotify("Get ore stopped: charge did not start.")
+                    end
+
+                    break
+                end
+            else
+                chargeMisses = 0
+
+                task.wait(MiningChargeTime)
+
+                if shouldStopForUnequip() then
+                    miningNotify("Get ore stopped: pickaxe unequipped.")
+                    break
+                end
+
+                AttackRemote:FireServer({
+                    Alpha = 1,
+                    ResponseTime = MiningChargeTime,
+                })
+
+                task.wait(MiningAttackResultDelay)
+
+                if hasTierWarningGui(entry.HitPosition) then
+                    miningNotify("Pickaxe is too weak for this ore.")
+                    break
+                end
+
+                hits = hits + 1
+
+                if not findOreTarget(entry.Ore) then
+                    break
+                end
+
+                task.wait(MiningActionDelay)
             end
-
-            hits = hits + 1
-            task.wait(MiningActionDelay)
         end
     end
 
@@ -2016,11 +2059,11 @@ local function mineTarget(entry, stopWhenToggleOff, stopOnUnequip)
 
     setToolInput(false, pickaxe)
 
-    if hits >= MiningMaxHitsPerOre and isOreAlive(entry.Ore) then
+    if hits >= MiningMaxHitsPerOre and findOreTarget(entry.Ore) then
         miningNotify("Skipped ore: pickaxe tier may be too low.")
     end
 
-    return hits > 0 and not isOreAlive(entry.Ore), dropOrigin
+    return hits > 0 and not findOreTarget(entry.Ore), dropOrigin
 end
 
 local function mineOneOre(stopWhenToggleOff, stopOnUnequip)
