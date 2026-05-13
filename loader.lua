@@ -131,8 +131,10 @@ local Window = Library:CreateWindow({
 
 local Tabs = {
     Main = Window:AddTab("Main", "house"),
-    Player = Window:AddTab("Player", "user"),
     Mining = Window:AddTab("Ores", "pickaxe"),
+    Player = Window:AddTab("Player", "user"),
+    Teleports = Window:AddTab("Teleports", "map-pin"),
+    Autobuy = Window:AddTab("Autobuy", "shopping-cart"),
     Settings = Window:AddTab("UI Settings", "settings"),
 }
 
