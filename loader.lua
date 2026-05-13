@@ -1349,9 +1349,14 @@ local function moveDroppedOresToBase(origin)
     local moved = 0
 
     for _, part in ipairs(getDroppedOreParts(origin)) do
-        if moveGrabPartToBase(part, destination + Vector3.new(0, moved * 0.25, 0)) then
+        if moveGrabPartToBase(part, destination + Vector3.new(0, moved * 0.35, 0)) then
             moved = moved + 1
         end
+    end
+
+    local root = getRoot()
+    if root then
+        root.CFrame = CFrame.new(destination + Vector3.new(0, MiningTeleportOffset, 0))
     end
 
     return moved
