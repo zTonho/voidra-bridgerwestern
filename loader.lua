@@ -708,6 +708,7 @@ local MiningChargeTime = 0.63
 local MiningActionDelay = 0.2
 local MiningTeleportOffset = 5
 local MiningIdleDelay = 1
+local MiningMaxHitsPerOre = 60
 
 local OreNames = {
     "All",
@@ -822,6 +823,11 @@ local function getRoot()
         )
 end
 
+local function getHumanoid()
+    local character = getCharacter()
+    return character and character:FindFirstChildOfClass("Humanoid")
+end
+
 local function getPosition(instance)
     if not instance then
         return nil
@@ -878,12 +884,34 @@ local function getPickaxe()
     return nil
 end
 
-local function setToolInput(active)
+local function equipPickaxe()
+    local pickaxe = getPickaxe()
+
+    if not pickaxe then
+        miningNotify("No pickaxe found.")
+        return nil
+    end
+
+    local humanoid = getHumanoid()
+    local character = getCharacter()
+
+    if humanoid and character and pickaxe:IsA("Tool") and pickaxe.Parent ~= character then
+        pcall(function()
+            humanoid:EquipTool(pickaxe)
+        end)
+
+        task.wait(0.2)
+    end
+
+    return pickaxe
+end
+
+local function setToolInput(active, pickaxe)
     if not ToolInputChangedRemote then
         return
     end
 
-    local pickaxe = getPickaxe()
+    pickaxe = pickaxe or getPickaxe()
     if pickaxe then
         pcall(function()
             ToolInputChangedRemote:FireServer(pickaxe, active)
@@ -934,7 +962,7 @@ local function findOreTarget(ore)
         return ore
     end
 
-    return ore:FindFirstChildWhichIsA("BasePart", true)
+    return nil
 end
 
 local function collectTargetsFromOre(targets, ore)
@@ -1007,8 +1035,45 @@ local function teleportNear(position)
     return true
 end
 
-local function mineTarget(entry)
-    if not entry or not entry.Target or not entry.Target.Parent then
+local function canContinueMining(stopWhenToggleOff)
+    if MiningState.StopRequested then
+        return false
+    end
+
+    if stopWhenToggleOff and Toggles.MiningAutoFarm and not Toggles.MiningAutoFarm.Value then
+        return false
+    end
+
+    return true
+end
+
+local function refreshOreEntry(entry)
+    if not entry or not entry.Ore or not entry.Ore.Parent then
+        return false
+    end
+
+    local target = findOreTarget(entry.Ore)
+    if not target or not target.Parent then
+        return false
+    end
+
+    local position = getPosition(target)
+    if not position then
+        return false
+    end
+
+    entry.Target = target
+    entry.HitPosition = position
+    return true
+end
+
+local function mineTarget(entry, stopWhenToggleOff)
+    if not refreshOreEntry(entry) then
+        return false
+    end
+
+    local pickaxe = equipPickaxe()
+    if not pickaxe then
         return false
     end
 
@@ -1017,26 +1082,32 @@ local function mineTarget(entry)
         return false
     end
 
-    task.wait(0.1)
+    setToolInput(true, pickaxe)
 
-    setToolInput(true)
+    local hits = 0
 
-    ChargeRemote:FireServer({
-        Target = entry.Target,
-        HitPosition = entry.HitPosition,
-    })
+    while canContinueMining(stopWhenToggleOff) and hits < MiningMaxHitsPerOre and refreshOreEntry(entry) do
+        teleportNear(entry.HitPosition)
+        task.wait(0.1)
 
-    task.wait(MiningChargeTime)
+        ChargeRemote:FireServer({
+            Target = entry.Target,
+            HitPosition = entry.HitPosition,
+        })
 
-    AttackRemote:FireServer({
-        Alpha = 1,
-        ResponseTime = MiningChargeTime,
-    })
+        task.wait(MiningChargeTime)
 
-    setToolInput(false)
-    task.wait(MiningActionDelay)
+        AttackRemote:FireServer({
+            Alpha = 1,
+            ResponseTime = MiningChargeTime,
+        })
 
-    return true
+        hits = hits + 1
+        task.wait(MiningActionDelay)
+    end
+
+    setToolInput(false, pickaxe)
+    return hits > 0
 end
 
 local function mineRoute(stopWhenToggleOff)
@@ -1058,7 +1129,7 @@ local function mineRoute(stopWhenToggleOff)
             break
         end
 
-        minedAny = mineTarget(entry) or minedAny
+        minedAny = mineTarget(entry, stopWhenToggleOff) or minedAny
     end
 
     return minedAny
