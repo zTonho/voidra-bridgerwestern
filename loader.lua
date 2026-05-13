@@ -715,6 +715,7 @@ local MiningDropScanRadius = 45
 local MiningGrabSteps = 14
 local MiningGrabStepDelay = 0.035
 local MiningBaseDropHeight = 6
+local MiningMaxChargeMisses = 20
 local LastMiningWarning = 0
 
 local OreNames = {
@@ -963,6 +964,7 @@ local function ownerMatchesLocalPlayer(owner)
     if owner:IsA("ObjectValue") then
         return owner.Value == LocalPlayer
             or (owner.Value and owner.Value.Name == LocalPlayer.Name)
+            or (owner.Value and tostring(owner.Value) == LocalPlayer.Name)
     end
 
     if owner:IsA("StringValue") then
@@ -990,7 +992,7 @@ local function getLocalPlot()
     end
 
     for _, plot in ipairs(plots:GetChildren()) do
-        local owner = plot:FindFirstChild("Owner", true)
+        local owner = plot:FindFirstChild("Owner", true) or plot:FindFirstChild("owner", true)
 
         if ownerMatchesLocalPlayer(owner) then
             return plot
@@ -1308,10 +1310,23 @@ local function moveGrabPartToBase(part, destination)
         local alpha = i / MiningGrabSteps
         local position = startPosition:Lerp(destination, alpha)
 
+        pcall(function()
+            part.CFrame = CFrame.new(position)
+            part.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+            part.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+        end)
+
         moved = callGrabHandler(part, "Grab", position) or moved
         task.wait(MiningGrabStepDelay)
     end
 
+    pcall(function()
+        part.CFrame = CFrame.new(destination)
+        part.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+        part.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+    end)
+
+    callGrabHandler(part, "Grab", destination)
     callGrabHandler(part, "Ungrab")
     return moved
 end
@@ -1404,6 +1419,7 @@ local function mineTarget(entry, stopWhenToggleOff)
 
     local hits = 0
     local dropOrigin = entry.HitPosition
+    local chargeMisses = 0
 
     while canContinueMining(stopWhenToggleOff) and hits < MiningMaxHitsPerOre and isOreAlive(entry.Ore) and refreshOreEntry(entry) do
         teleportNear(entry.HitPosition)
@@ -1418,25 +1434,31 @@ local function mineTarget(entry, stopWhenToggleOff)
         if not waitForChargeGui() then
             miningWarn("Charge did not start. Pickaxe may be on cooldown.")
             task.wait(MiningCooldownDelay)
-            break
+            chargeMisses = chargeMisses + 1
+
+            if chargeMisses >= MiningMaxChargeMisses then
+                break
+            end
+        else
+            chargeMisses = 0
+
+            task.wait(MiningChargeTime)
+
+            AttackRemote:FireServer({
+                Alpha = 1,
+                ResponseTime = MiningChargeTime,
+            })
+
+            task.wait(0.15)
+
+            if hasTierWarningGui() then
+                miningWarn("Pickaxe tier is not valid for this ore.")
+                break
+            end
+
+            hits = hits + 1
+            task.wait(MiningActionDelay)
         end
-
-        task.wait(MiningChargeTime)
-
-        AttackRemote:FireServer({
-            Alpha = 1,
-            ResponseTime = MiningChargeTime,
-        })
-
-        task.wait(0.15)
-
-        if hasTierWarningGui() then
-            miningWarn("Pickaxe tier is not valid for this ore.")
-            break
-        end
-
-        hits = hits + 1
-        task.wait(MiningActionDelay)
     end
 
     setToolInput(false, pickaxe)
@@ -1481,19 +1503,6 @@ MiningBox:AddButton({
         task.spawn(function()
             MiningState.StopRequested = false
             mineOneOre(false)
-        end)
-    end,
-})
-
-MiningBox:AddButton({
-    Text = "Send drops to base",
-    Func = function()
-        task.spawn(function()
-            local moved = moveDroppedOresToBase(nil)
-
-            if moved > 0 then
-                miningNotify("Ore collected successfully.")
-            end
         end)
     end,
 })
