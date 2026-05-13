@@ -776,6 +776,12 @@ local OreNames = {
     "Wildcore",
 }
 
+local OreLookup = {}
+for _, oreName in ipairs(OreNames) do
+    OreLookup[oreName] = true
+end
+OreLookup.All = nil
+
 local EventsFolder = ReplicatedStorage:WaitForChild("Events", 10)
 if not EventsFolder then
     error("ReplicatedStorage.Events was not found.")
@@ -841,7 +847,15 @@ end
 
 local function getOresFolder()
     local worldSpawn = workspace:FindFirstChild("WorldSpawn")
-    return worldSpawn and worldSpawn:FindFirstChild("Ores") or nil
+
+    if worldSpawn then
+        local ores = worldSpawn:FindFirstChild("Ores")
+        if ores then
+            return ores
+        end
+    end
+
+    return workspace:FindFirstChild("Ores")
 end
 
 local function getPickaxe()
@@ -878,10 +892,18 @@ local function setToolInput(active)
 end
 
 local function addOreTarget(targets, ore, target)
+    if targets.Seen and targets.Seen[target] then
+        return
+    end
+
     local position = getPosition(target)
 
     if not position then
         return
+    end
+
+    if targets.Seen then
+        targets.Seen[target] = true
     end
 
     targets[#targets + 1] = {
@@ -891,52 +913,76 @@ local function addOreTarget(targets, ore, target)
     }
 end
 
-local function collectTargetsFromOre(targets, ore)
+local function findOreTarget(ore)
     local hittable = ore:FindFirstChild("Hittable")
 
     if hittable then
-        local foundNamedTargets = false
-
-        for _, child in ipairs(hittable:GetChildren()) do
-            if child.Name == "Part" then
-                addOreTarget(targets, ore, child)
-                foundNamedTargets = true
+        for _, child in ipairs(hittable:GetDescendants()) do
+            if child:IsA("BasePart") and child.Name == "Part" then
+                return child
             end
-        end
-
-        if foundNamedTargets then
-            return
         end
 
         for _, descendant in ipairs(hittable:GetDescendants()) do
             if descendant:IsA("BasePart") then
-                addOreTarget(targets, ore, descendant)
-                return
+                return descendant
             end
         end
-    elseif ore:IsA("BasePart") then
-        addOreTarget(targets, ore, ore)
-    else
-        local part = ore:FindFirstChildWhichIsA("BasePart", true)
-        if part then
-            addOreTarget(targets, ore, part)
-        end
     end
+
+    if ore:IsA("BasePart") then
+        return ore
+    end
+
+    return ore:FindFirstChildWhichIsA("BasePart", true)
+end
+
+local function collectTargetsFromOre(targets, ore)
+    local target = findOreTarget(ore)
+
+    if target then
+        addOreTarget(targets, ore, target)
+    end
+end
+
+local function normalizeOreName(name)
+    name = tostring(name)
+
+    if OreLookup[name] then
+        return name
+    end
+
+    name = name:gsub("%s*%(%d+%)$", "")
+    name = name:gsub("%s*_%d+$", "")
+    name = name:gsub("%s*%-?%d+$", "")
+
+    if OreLookup[name] then
+        return name
+    end
+
+    return nil
 end
 
 local function getOreTargets(oreFilter)
     local oresFolder = getOresFolder()
-    local targets = {}
+    local targets = {
+        Seen = {},
+    }
 
     if not oresFolder then
+        miningNotify("workspace.WorldSpawn.Ores was not found.")
         return targets
     end
 
     for _, ore in ipairs(oresFolder:GetChildren()) do
-        if oreFilter == "All" or ore.Name == oreFilter then
+        local oreName = normalizeOreName(ore.Name)
+
+        if oreName and (oreFilter == "All" or oreName == oreFilter) then
             collectTargetsFromOre(targets, ore)
         end
     end
+
+    targets.Seen = nil
 
     local root = getRoot()
     local rootPosition = root and root.Position
