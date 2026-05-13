@@ -705,12 +705,12 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer = Players.LocalPlayer or Players.PlayerAdded:Wait()
 local MiningState = State.Mining
 local MiningChargeTime = 0.63
-local MiningActionDelay = 0.2
+local MiningActionDelay = 0.04
 local MiningTeleportOffset = 5
-local MiningIdleDelay = 1
+local MiningIdleDelay = 0.35
 local MiningMaxHitsPerOre = 60
-local MiningChargeUiTimeout = 0.8
-local MiningCooldownDelay = 1.25
+local MiningChargeUiTimeout = 0.5
+local MiningCooldownDelay = 0.65
 local MiningDropScanRadius = 14
 local MiningGrabSteps = 8
 local MiningGrabStepDelay = 0.015
@@ -719,6 +719,13 @@ local MiningDropSettleDelay = 0.12
 local MiningFastGrabRepeats = 3
 local MiningFastGrabDelay = 0.005
 local MiningStorageBatchDelay = 0.01
+local MiningAutoGrabRepeats = 2
+local MiningAutoGrabDelay = 0.002
+local MiningAutoBatchDelay = 0.004
+local MiningDropWaitTimeout = 0.25
+local MiningDropPollDelay = 0.02
+local MiningTargetSettleDelay = 0.03
+local MiningAttackResultDelay = 0.08
 local MiningBaseDropHeight = 1.75
 local MiningDropSpacing = 5
 local MiningDropMaxColumns = 7
@@ -1305,6 +1312,22 @@ local function getEquippablePickaxe()
     return nil
 end
 
+local function getEquippedPickaxe()
+    local character = getCharacter()
+
+    if not character then
+        return nil
+    end
+
+    for _, object in ipairs(character:GetChildren()) do
+        if object:IsA("Tool") and object.Name:lower():find("pickaxe", 1, true) then
+            return object
+        end
+    end
+
+    return nil
+end
+
 local function equipPickaxe()
     local humanoid = getHumanoid()
     local character = getCharacter()
@@ -1318,7 +1341,7 @@ local function equipPickaxe()
         task.wait(0.2)
     end
 
-    local pickaxe = getPickaxe()
+    local pickaxe = getEquippedPickaxe() or getPickaxe()
     if not pickaxe then
         miningNotify("No pickaxe found.")
         return nil
@@ -1536,6 +1559,18 @@ local function getDroppedOreParts(origin)
     end, origin)
 end
 
+local function waitForDroppedOreParts(origin)
+    local startedAt = os.clock()
+    local parts = getDroppedOreParts(origin)
+
+    while #parts == 0 and os.clock() - startedAt < MiningDropWaitTimeout do
+        task.wait(MiningDropPollDelay)
+        parts = getDroppedOreParts(origin)
+    end
+
+    return parts
+end
+
 local function getBaseDroppedOreParts()
     local plotPosition = getPlotStandPosition()
 
@@ -1641,7 +1676,7 @@ local function moveGrabPartToBase(part, destination)
     return moved
 end
 
-local function moveGrabPartFast(part, destination)
+local function moveGrabPartFast(part, destination, repeats, delay)
     if not part or not part.Parent or not destination then
         return false
     end
@@ -1652,10 +1687,13 @@ local function moveGrabPartFast(part, destination)
         return false
     end
 
-    local moved = callGrabHandler(part, "Grab", startPosition)
-    task.wait(MiningFastGrabDelay)
+    repeats = repeats or MiningFastGrabRepeats
+    delay = delay or MiningFastGrabDelay
 
-    for _ = 1, MiningFastGrabRepeats do
+    local moved = callGrabHandler(part, "Grab", startPosition)
+    task.wait(delay)
+
+    for _ = 1, repeats do
         if not part.Parent then
             break
         end
@@ -1667,7 +1705,7 @@ local function moveGrabPartFast(part, destination)
         end)
 
         moved = callGrabHandler(part, "Grab", destination) or moved
-        task.wait(MiningFastGrabDelay)
+        task.wait(delay)
     end
 
     callGrabHandler(part, "Ungrab")
@@ -1687,18 +1725,16 @@ local function moveDroppedOresToBase(origin)
         return 0
     end
 
-    task.wait(0.2)
-
     local moved = 0
 
-    for _, part in ipairs(getDroppedOreParts(origin)) do
+    for _, part in ipairs(waitForDroppedOreParts(origin)) do
         local partDestination = getPlotDropPosition(moved + 1, part)
 
-        if partDestination and moveGrabPartFast(part, partDestination) then
+        if partDestination and moveGrabPartFast(part, partDestination, MiningAutoGrabRepeats, MiningAutoGrabDelay) then
             moved = moved + 1
 
             if moved % 10 == 0 then
-                task.wait(MiningStorageBatchDelay)
+                task.wait(MiningAutoBatchDelay)
             end
         end
     end
@@ -1868,6 +1904,16 @@ local function mineTarget(entry, stopWhenToggleOff, stopOnUnequip)
         return false
     end
 
+    local unequipped = false
+    local unequipConnection = nil
+    local trackedPickaxe = stopOnUnequip and getEquippedPickaxe() or pickaxe
+    local maxChargeMisses = stopOnUnequip and 3 or MiningMaxChargeMisses
+
+    if stopOnUnequip and not trackedPickaxe then
+        miningNotify("Get ore stopped: pickaxe unequipped.")
+        return false
+    end
+
     if not teleportNear(entry.HitPosition) then
         miningNotify("Character root was not found.")
         return false
@@ -1875,15 +1921,8 @@ local function mineTarget(entry, stopWhenToggleOff, stopOnUnequip)
 
     setToolInput(true, pickaxe)
 
-    local unequipped = false
-    local unequipConnection = nil
-    local enforceToolParent = stopOnUnequip
-        and pickaxe:IsA("Tool")
-        and pickaxe.Parent == getCharacter()
-    local maxChargeMisses = stopOnUnequip and 3 or MiningMaxChargeMisses
-
-    if stopOnUnequip and pickaxe:IsA("Tool") then
-        unequipConnection = pickaxe.Unequipped:Connect(function()
+    if stopOnUnequip and trackedPickaxe and trackedPickaxe:IsA("Tool") then
+        unequipConnection = trackedPickaxe.Unequipped:Connect(function()
             unequipped = true
         end)
     end
@@ -1897,7 +1936,11 @@ local function mineTarget(entry, stopWhenToggleOff, stopOnUnequip)
             return true
         end
 
-        if enforceToolParent and pickaxe.Parent ~= getCharacter() then
+        if not getEquippedPickaxe() then
+            return true
+        end
+
+        if trackedPickaxe and trackedPickaxe.Parent ~= getCharacter() then
             return true
         end
 
@@ -1916,7 +1959,7 @@ local function mineTarget(entry, stopWhenToggleOff, stopOnUnequip)
 
         teleportNear(entry.HitPosition)
         dropOrigin = entry.HitPosition
-        task.wait(0.1)
+        task.wait(MiningTargetSettleDelay)
 
         if shouldStopForUnequip() then
             miningNotify("Get ore stopped: pickaxe unequipped.")
@@ -1955,7 +1998,7 @@ local function mineTarget(entry, stopWhenToggleOff, stopOnUnequip)
                 ResponseTime = MiningChargeTime,
             })
 
-            task.wait(0.15)
+            task.wait(MiningAttackResultDelay)
 
             if hasTierWarningGui(entry.HitPosition) then
                 miningNotify("Pickaxe is too weak for this ore.")
