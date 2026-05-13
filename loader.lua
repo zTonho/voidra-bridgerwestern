@@ -725,6 +725,7 @@ local MiningDropMaxColumns = 7
 local MiningPlotInset = 5
 local MiningBringRadius = 18
 local MiningSellDropSpacing = 4
+local MiningTierWarningScanRadius = 45
 local MiningMaxChargeMisses = 20
 local LastMiningWarning = 0
 
@@ -890,6 +891,33 @@ local function guiText(object)
     return ""
 end
 
+local function getPosition(instance)
+    if not instance then
+        return nil
+    end
+
+    if instance:IsA("BasePart") then
+        return instance.Position
+    end
+
+    if instance:IsA("Attachment") then
+        return instance.WorldPosition
+    end
+
+    if instance:IsA("Model") then
+        local ok, pivot = pcall(function()
+            return instance:GetPivot()
+        end)
+
+        if ok then
+            return pivot.Position
+        end
+    end
+
+    local part = instance:FindFirstChildWhichIsA("BasePart", true)
+    return part and part.Position or nil
+end
+
 local function isLikelyChargeGui(object)
     if not isVisibleGui(object) then
         return false
@@ -901,28 +929,81 @@ local function isLikelyChargeGui(object)
         or value:find("strength", 1, true) ~= nil
 end
 
-local function hasTierWarningGui()
-    local playerGui = getPlayerGui()
+local function isTierWarningText(value)
+    value = tostring(value):lower()
 
-    if not playerGui then
+    return value:find("too sturdy", 1, true) ~= nil
+        or value:find("sturdy", 1, true) ~= nil
+        or value:find("too high", 1, true) ~= nil
+        or value:find("too weak", 1, true) ~= nil
+        or (
+            value:find("tier", 1, true) ~= nil
+            and (
+                value:find("too", 1, true) ~= nil
+                or value:find("weak", 1, true) ~= nil
+                or value:find("high", 1, true) ~= nil
+                or value:find("low", 1, true) ~= nil
+            )
+        )
+end
+
+local function getGuiWorldPosition(object)
+    local current = object
+
+    while current and current ~= workspace and current ~= game do
+        if current:IsA("BillboardGui") or current:IsA("SurfaceGui") then
+            local adornee = current.Adornee
+            local adorneePosition = getPosition(adornee)
+
+            if adorneePosition then
+                return adorneePosition
+            end
+        end
+
+        local position = getPosition(current)
+
+        if position then
+            return position
+        end
+
+        current = current.Parent
+    end
+
+    return nil
+end
+
+local function hasTierWarningInContainer(container, nearPosition)
+    if not container then
         return false
     end
 
-    for _, object in ipairs(playerGui:GetDescendants()) do
+    for _, object in ipairs(container:GetDescendants()) do
         if isVisibleGui(object) then
             local value = (object.Name .. " " .. guiText(object)):lower()
 
-            if value:find("tier", 1, true)
-                or value:find("too high", 1, true)
-                or value:find("too sturdy", 1, true)
-                or value:find("sturdy", 1, true)
-            then
-                return true
+            if isTierWarningText(value) then
+                if not nearPosition then
+                    return true
+                end
+
+                local position = getGuiWorldPosition(object)
+
+                if position and (position - nearPosition).Magnitude <= MiningTierWarningScanRadius then
+                    return true
+                end
             end
         end
     end
 
     return false
+end
+
+local function hasTierWarningGui(nearPosition)
+    if hasTierWarningInContainer(getPlayerGui(), nil) then
+        return true
+    end
+
+    return hasTierWarningInContainer(workspace, nearPosition)
 end
 
 local function waitForChargeGui()
@@ -945,29 +1026,6 @@ local function waitForChargeGui()
     end
 
     return false
-end
-
-local function getPosition(instance)
-    if not instance then
-        return nil
-    end
-
-    if instance:IsA("BasePart") then
-        return instance.Position
-    end
-
-    if instance:IsA("Model") then
-        local ok, pivot = pcall(function()
-            return instance:GetPivot()
-        end)
-
-        if ok then
-            return pivot.Position
-        end
-    end
-
-    local part = instance:FindFirstChildWhichIsA("BasePart", true)
-    return part and part.Position or nil
 end
 
 local function getAreaData(target, fallbackSize)
@@ -1486,6 +1544,14 @@ local function getBaseDroppedOreParts()
     end, plotPosition)
 end
 
+local function getOwnedDroppedOreParts()
+    local root = getRoot()
+    local plotPosition = getPlotStandPosition()
+    local sortPosition = plotPosition or (root and root.Position) or nil
+
+    return getDroppedOrePartsWhere(nil, sortPosition)
+end
+
 local function getSafePlayerDroppedOreParts()
     local root = getRoot()
     local rootPosition = root and root.Position
@@ -1621,16 +1687,19 @@ local function moveDroppedOresToBase(origin)
         return 0
     end
 
-    task.wait(0.35)
+    task.wait(0.2)
 
     local moved = 0
 
     for _, part in ipairs(getDroppedOreParts(origin)) do
         local partDestination = getPlotDropPosition(moved + 1, part)
 
-        if partDestination and moveGrabPartToBase(part, partDestination) then
+        if partDestination and moveGrabPartFast(part, partDestination) then
             moved = moved + 1
-            task.wait(MiningDropSettleDelay)
+
+            if moved % 10 == 0 then
+                task.wait(MiningStorageBatchDelay)
+            end
         end
     end
 
@@ -1668,10 +1737,10 @@ local function sellBaseOres()
         return 0
     end
 
-    local parts = getBaseDroppedOreParts()
+    local parts = getOwnedDroppedOreParts()
 
     if #parts == 0 then
-        miningNotify("No ores found in your base.")
+        miningNotify("No owned ores found.")
         return 0
     end
 
@@ -1789,7 +1858,7 @@ local function refreshOreEntry(entry)
     return true
 end
 
-local function mineTarget(entry, stopWhenToggleOff)
+local function mineTarget(entry, stopWhenToggleOff, stopOnUnequip)
     if not refreshOreEntry(entry) then
         return false
     end
@@ -1806,14 +1875,53 @@ local function mineTarget(entry, stopWhenToggleOff)
 
     setToolInput(true, pickaxe)
 
+    local unequipped = false
+    local unequipConnection = nil
+    local enforceToolParent = stopOnUnequip
+        and pickaxe:IsA("Tool")
+        and pickaxe.Parent == getCharacter()
+    local maxChargeMisses = stopOnUnequip and 3 or MiningMaxChargeMisses
+
+    if stopOnUnequip and pickaxe:IsA("Tool") then
+        unequipConnection = pickaxe.Unequipped:Connect(function()
+            unequipped = true
+        end)
+    end
+
+    local function shouldStopForUnequip()
+        if not stopOnUnequip then
+            return false
+        end
+
+        if unequipped then
+            return true
+        end
+
+        if enforceToolParent and pickaxe.Parent ~= getCharacter() then
+            return true
+        end
+
+        return false
+    end
+
     local hits = 0
     local dropOrigin = entry.HitPosition
     local chargeMisses = 0
 
     while canContinueMining(stopWhenToggleOff) and hits < MiningMaxHitsPerOre and isOreAlive(entry.Ore) and refreshOreEntry(entry) do
+        if shouldStopForUnequip() then
+            miningNotify("Get ore stopped: pickaxe unequipped.")
+            break
+        end
+
         teleportNear(entry.HitPosition)
         dropOrigin = entry.HitPosition
         task.wait(0.1)
+
+        if shouldStopForUnequip() then
+            miningNotify("Get ore stopped: pickaxe unequipped.")
+            break
+        end
 
         ChargeRemote:FireServer({
             Target = entry.Target,
@@ -1825,13 +1933,22 @@ local function mineTarget(entry, stopWhenToggleOff)
             task.wait(MiningCooldownDelay)
             chargeMisses = chargeMisses + 1
 
-            if chargeMisses >= MiningMaxChargeMisses then
+            if chargeMisses >= maxChargeMisses then
+                if stopOnUnequip then
+                    miningNotify("Get ore stopped: charge did not start.")
+                end
+
                 break
             end
         else
             chargeMisses = 0
 
             task.wait(MiningChargeTime)
+
+            if shouldStopForUnequip() then
+                miningNotify("Get ore stopped: pickaxe unequipped.")
+                break
+            end
 
             AttackRemote:FireServer({
                 Alpha = 1,
@@ -1840,7 +1957,7 @@ local function mineTarget(entry, stopWhenToggleOff)
 
             task.wait(0.15)
 
-            if hasTierWarningGui() then
+            if hasTierWarningGui(entry.HitPosition) then
                 miningNotify("Pickaxe is too weak for this ore.")
                 break
             end
@@ -1848,6 +1965,10 @@ local function mineTarget(entry, stopWhenToggleOff)
             hits = hits + 1
             task.wait(MiningActionDelay)
         end
+    end
+
+    if unequipConnection then
+        unequipConnection:Disconnect()
     end
 
     setToolInput(false, pickaxe)
@@ -1859,7 +1980,7 @@ local function mineTarget(entry, stopWhenToggleOff)
     return hits > 0 and not isOreAlive(entry.Ore), dropOrigin
 end
 
-local function mineOneOre(stopWhenToggleOff)
+local function mineOneOre(stopWhenToggleOff, stopOnUnequip)
     local entry = getNearestOreTarget(MiningState.SelectedOre)
 
     if not entry then
@@ -1867,7 +1988,7 @@ local function mineOneOre(stopWhenToggleOff)
         return false
     end
 
-    local mined, dropOrigin = mineTarget(entry, stopWhenToggleOff)
+    local mined, dropOrigin = mineTarget(entry, stopWhenToggleOff, stopOnUnequip)
 
     if mined then
         moveDroppedOresToBase(dropOrigin)
@@ -1891,7 +2012,7 @@ MiningBox:AddButton({
     Func = function()
         task.spawn(function()
             MiningState.StopRequested = false
-            mineOneOre(false)
+            mineOneOre(false, true)
         end)
     end,
 })
@@ -1935,7 +2056,7 @@ Toggles.MiningAutoFarm:OnChanged(function(enabled)
 
     task.spawn(function()
         while Toggles.MiningAutoFarm and Toggles.MiningAutoFarm.Value and not MiningState.StopRequested do
-            local mined = mineOneOre(true)
+            local mined = mineOneOre(true, false)
 
             if not mined then
                 task.wait(MiningIdleDelay)
