@@ -705,13 +705,13 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer = Players.LocalPlayer or Players.PlayerAdded:Wait()
 local MiningState = State.Mining
 local MiningChargeTime = 0.63
-local MiningActionDelay = 0.005
+local MiningActionDelay = 0
 local MiningTeleportOffset = 5
 local MiningIdleDelay = 0.35
-local MiningMaxHitsPerOre = 420
-local MiningChargeUiTimeout = 0.22
-local MiningChargeUiPollDelay = 0.01
-local MiningCooldownDelay = 0.25
+local MiningMaxHitsPerOre = 6000
+local MiningChargeUiTimeout = 0.16
+local MiningChargeUiPollDelay = 0.005
+local MiningCooldownDelay = 0.15
 local MiningGetOreMaxChargeMisses = 8
 local MiningDropScanRadius = 14
 local MiningGrabSteps = 8
@@ -729,18 +729,19 @@ local MiningAutoRouteDelay = 0.012
 local MiningAutoRouteFinalRepeats = 4
 local MiningAutoBatchDelay = 0.004
 local MiningBagCapacity = 5
-local MiningBagStoreDelay = 0.06
-local MiningBagStorePositionDelay = 0.12
+local MiningBagStoreDelay = 0.04
+local MiningBagStorePositionDelay = 0.06
 local MiningBagDropDelay = 0.06
-local MiningBagDropVerifyDelay = 0.12
+local MiningBagStoreHeight = 3
 local MiningGrabReleaseRepeats = 6
 local MiningGrabReleaseDelay = 0.04
 local MiningDropWaitTimeout = 0.25
 local MiningDropPollDelay = 0.02
-local MiningTargetSettleDelay = 0.01
-local MiningAttackResultDelay = 0.005
-local MiningAttackBurstCount = 12
-local MiningAttackBurstDelay = 0.003
+local MiningTargetSettleDelay = 0.005
+local MiningAttackResultDelay = 0.001
+local MiningAttackBurstCount = 30
+local MiningAttackBurstDelay = 0
+local MiningAttackBurstYieldEvery = 10
 local MiningTeleportRefreshDistance = 12
 local MiningOreSpotLoadDelay = 4
 local MiningOreSpotLoadCooldown = 20
@@ -1645,6 +1646,30 @@ local function waitForDroppedOreParts(origin)
     return parts
 end
 
+local function getDroppedOrePartsNearCharacter(origin)
+    local root = getRoot()
+    local rootPosition = root and root.Position
+
+    return getDroppedOrePartsWhere(function(_, position)
+        local nearOrigin = origin and (position - origin).Magnitude <= MiningDropScanRadius
+        local nearCharacter = rootPosition and (position - rootPosition).Magnitude <= MiningDropScanRadius
+
+        return nearCharacter or nearOrigin
+    end, rootPosition or origin)
+end
+
+local function waitForDroppedOrePartsNearCharacter(origin)
+    local startedAt = os.clock()
+    local parts = getDroppedOrePartsNearCharacter(origin)
+
+    while #parts == 0 and os.clock() - startedAt < MiningDropWaitTimeout do
+        task.wait(MiningDropPollDelay)
+        parts = getDroppedOrePartsNearCharacter(origin)
+    end
+
+    return parts
+end
+
 local function getBaseDroppedOreParts()
     local plotPosition = getPlotStandPosition()
 
@@ -1937,7 +1962,7 @@ local function storePartInItemBag(part)
     local position = getPosition(part)
 
     if position then
-        setCharacterAt(position)
+        setCharacterExactAt(position + Vector3.new(0, MiningBagStoreHeight, 0))
         task.wait(MiningBagStorePositionDelay)
     end
 
@@ -1947,20 +1972,6 @@ local function storePartInItemBag(part)
 
     task.wait(MiningBagStoreDelay)
     return true
-end
-
-local function partNeedsFallbackAfterBagDrop(part)
-    if not isDroppedPartActive(part) then
-        return false
-    end
-
-    local position = getPosition(part)
-
-    if not position then
-        return false
-    end
-
-    return not isInsideLocalPlot(position, 6)
 end
 
 local function dropItemBagAtBase(startSlot, amount)
@@ -2076,63 +2087,48 @@ local function moveDroppedOresToBase(origin)
         return 0
     end
 
-    local parts = waitForDroppedOreParts(origin)
+    local parts = waitForDroppedOrePartsNearCharacter(origin)
     local useItemBag = canUseItemBagTransport()
     local moved = 0
-    local storedInBag = {}
-    local fallbackParts = {}
 
-    local function flushItemBag()
-        if #storedInBag <= 0 then
-            return
+    if useItemBag then
+        local storedInBag = 0
+
+        local function flushItemBag()
+            if storedInBag <= 0 then
+                return
+            end
+
+            moved = moved + dropItemBagAtBase(moved + 1, storedInBag)
+            storedInBag = 0
+            task.wait(MiningAutoBatchDelay)
         end
 
-        local dropped = dropItemBagAtBase(moved + 1, #storedInBag)
+        for _, part in ipairs(parts) do
+            if storePartInItemBag(part) then
+                storedInBag = storedInBag + 1
 
-        if dropped <= 0 then
-            miningWarn("Item Bag drop failed.")
-        end
-
-        task.wait(MiningBagDropVerifyDelay)
-
-        for _, storedPart in ipairs(storedInBag) do
-            if partNeedsFallbackAfterBagDrop(storedPart) then
-                fallbackParts[#fallbackParts + 1] = storedPart
-            else
-                moved = moved + 1
+                if storedInBag >= MiningBagCapacity then
+                    flushItemBag()
+                end
             end
         end
 
-        storedInBag = {}
-        task.wait(MiningAutoBatchDelay)
-    end
-
-    for _, part in ipairs(parts) do
-        if useItemBag and storePartInItemBag(part) then
-            storedInBag[#storedInBag + 1] = part
-
-            if #storedInBag >= MiningBagCapacity then
-                flushItemBag()
-            end
-        else
-            fallbackParts[#fallbackParts + 1] = part
-        end
-    end
-
-    flushItemBag()
-
-    if #fallbackParts > 0 and not GrabHandlerRemote then
+        flushItemBag()
+    elseif not GrabHandlerRemote then
         miningWarn("GrabHandler remote was not found.")
     end
 
-    for _, part in ipairs(fallbackParts) do
-        local partDestination = getPlotDropPosition(moved + 1, part)
+    if not useItemBag then
+        for _, part in ipairs(parts) do
+            local partDestination = getPlotDropPosition(moved + 1, part)
 
-        if GrabHandlerRemote and partDestination and moveGrabPartToBaseRouted(part, partDestination) then
-            moved = moved + 1
+            if GrabHandlerRemote and partDestination and moveGrabPartToBaseRouted(part, partDestination) then
+                moved = moved + 1
 
-            if moved % 10 == 0 then
-                task.wait(MiningAutoBatchDelay)
+                if moved % 10 == 0 then
+                    task.wait(MiningAutoBatchDelay)
+                end
             end
         end
     end
@@ -2486,7 +2482,7 @@ local function mineTarget(entry, stopWhenToggleOff, stopOnUnequip)
 
             local attacksFired = 0
 
-            for _ = 1, MiningAttackBurstCount do
+            for burstIndex = 1, MiningAttackBurstCount do
                 if shouldStopForUnequip() then
                     miningNotify("Get ore stopped: pickaxe unequipped.")
                     break
@@ -2502,7 +2498,12 @@ local function mineTarget(entry, stopWhenToggleOff, stopOnUnequip)
                 })
 
                 attacksFired = attacksFired + 1
-                task.wait(MiningAttackBurstDelay)
+
+                if MiningAttackBurstDelay > 0 then
+                    task.wait(MiningAttackBurstDelay)
+                elseif burstIndex % MiningAttackBurstYieldEvery == 0 then
+                    task.wait()
+                end
             end
 
             task.wait(MiningAttackResultDelay)
@@ -2519,7 +2520,7 @@ local function mineTarget(entry, stopWhenToggleOff, stopOnUnequip)
     setToolInput(false, pickaxe)
 
     if hits >= MiningMaxHitsPerOre and isOreAlive(entry.Ore) then
-        miningNotify("Skipped ore: hit limit reached.")
+        miningNotify("Skipped ore: safety hit limit reached.")
     end
 
     return hits > 0 and not isOreAlive(entry.Ore), dropOrigin
