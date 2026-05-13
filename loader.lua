@@ -727,6 +727,8 @@ local MiningDropPollDelay = 0.02
 local MiningTargetSettleDelay = 0.03
 local MiningAttackResultDelay = 0.08
 local MiningTeleportRefreshDistance = 12
+local MiningOreSpotLoadDelay = 4
+local MiningOreSpotLoadCooldown = 20
 local MiningBaseDropHeight = 1.75
 local MiningDropSpacing = 5
 local MiningDropMaxColumns = 7
@@ -736,6 +738,7 @@ local MiningSellDropSpacing = 4
 local MiningTierWarningScanRadius = 45
 local MiningMaxChargeMisses = 20
 local LastMiningWarning = 0
+local LastMiningOreSpotLoad = {}
 
 local OreNames = {
     "Abyssalite",
@@ -791,6 +794,7 @@ local OreNames = {
     "Snow",
     "Soulstone",
     "Sphalerite",
+    "Stone",
     "Sulfur",
     "Sunstone",
     "Tall Grass",
@@ -807,6 +811,22 @@ local OreLookup = {}
 for _, oreName in ipairs(OreNames) do
     OreLookup[oreName] = true
 end
+
+local OreLoadSpots = {
+    Marble = { Vector3.new(-595.55, 78.75, -240.07) },
+    Granite = { Vector3.new(-595.55, 78.75, -240.07) },
+    Lithium = { Vector3.new(-595.55, 78.75, -240.07) },
+    Dirt = { Vector3.new(1234.13, 2.70, 2458.88) },
+    Mud = { Vector3.new(1234.13, 2.70, 2458.88) },
+    Clay = { Vector3.new(1234.13, 2.70, 2458.88) },
+    Bauxite = { Vector3.new(-1182.11, -6.12, 1293.27) },
+    Iron = { Vector3.new(-1182.11, -6.12, 1293.27) },
+    Stone = { Vector3.new(-1182.11, -6.12, 1293.27) },
+    Copper = { Vector3.new(-1182.11, -6.12, 1293.27) },
+    Cobalt = { Vector3.new(332.95, -96.18, 3327.90) },
+    Amber = { Vector3.new(332.95, -96.18, 3327.90) },
+    Salt = { Vector3.new(-5952.75, -174.50, -2017.67) },
+}
 
 local EventsFolder = ReplicatedStorage:WaitForChild("Events", 10)
 if not EventsFolder then
@@ -1870,6 +1890,19 @@ local function teleportNear(position, force)
     return true
 end
 
+local function teleportToExact(position)
+    local root = getRoot()
+
+    if not root or not position then
+        return false
+    end
+
+    root.CFrame = CFrame.new(position)
+    root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+    root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+    return true
+end
+
 local function canContinueMining(stopWhenToggleOff)
     if MiningState.StopRequested then
         return false
@@ -1879,6 +1912,44 @@ local function canContinueMining(stopWhenToggleOff)
         return false
     end
 
+    return true
+end
+
+local function loadOreSpots(oreFilter, stopWhenToggleOff, force)
+    local spots = OreLoadSpots[oreFilter]
+
+    if not spots or #spots == 0 then
+        return false
+    end
+
+    local now = os.clock()
+    if not force and LastMiningOreSpotLoad[oreFilter] and now - LastMiningOreSpotLoad[oreFilter] < MiningOreSpotLoadCooldown then
+        return false
+    end
+
+    LastMiningOreSpotLoad[oreFilter] = now
+    miningNotify("Loading ores...")
+
+    for _, position in ipairs(spots) do
+        if not canContinueMining(stopWhenToggleOff) then
+            return false
+        end
+
+        if not teleportToExact(position) then
+            return false
+        end
+
+        local startedAt = os.clock()
+        while os.clock() - startedAt < MiningOreSpotLoadDelay do
+            if not canContinueMining(stopWhenToggleOff) then
+                return false
+            end
+
+            task.wait(0.1)
+        end
+    end
+
+    miningNotify("Ores loaded.")
     return true
 end
 
@@ -2032,6 +2103,10 @@ end
 
 local function mineOneOre(stopWhenToggleOff, stopOnUnequip)
     local entry = getNearestOreTarget(MiningState.SelectedOre)
+
+    if not entry and loadOreSpots(MiningState.SelectedOre, stopWhenToggleOff, not stopWhenToggleOff) then
+        entry = getNearestOreTarget(MiningState.SelectedOre)
+    end
 
     if not entry then
         if not stopWhenToggleOff then
