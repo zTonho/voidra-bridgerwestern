@@ -705,7 +705,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer = Players.LocalPlayer or Players.PlayerAdded:Wait()
 local MiningState = State.Mining
 local MiningChargeTime = 0.63
-local MiningActionDelay = 0
+local MiningActionDelay = 0.005
 local MiningTeleportOffset = 5
 local MiningIdleDelay = 0.35
 local MiningMaxHitsPerOre = 6000
@@ -738,10 +738,10 @@ local MiningGrabReleaseDelay = 0.04
 local MiningDropWaitTimeout = 0.25
 local MiningDropPollDelay = 0.02
 local MiningTargetSettleDelay = 0.005
-local MiningAttackResultDelay = 0.001
-local MiningAttackBurstCount = 30
-local MiningAttackBurstDelay = 0
-local MiningAttackBurstYieldEvery = 10
+local MiningAttackResultDelay = 0.01
+local MiningAttackBurstCount = 12
+local MiningAttackBurstDelay = 0.002
+local MiningAttackBurstYieldEvery = 4
 local MiningTeleportRefreshDistance = 12
 local MiningOreSpotLoadDelay = 4
 local MiningOreSpotLoadCooldown = 20
@@ -1916,7 +1916,7 @@ local function equipItemBag()
             humanoid:EquipTool(bag)
         end)
 
-        task.wait(0.12)
+        task.wait(0.25)
         bag = character:FindFirstChild("Item Bag") or character:FindFirstChild("Item Bag", true) or bag
     end
 
@@ -1932,9 +1932,8 @@ end
 
 local function canUseItemBagTransport()
     local bagAction = getItemBagDropRemote()
-    local playerAction = getPlayerActionRemote(1)
 
-    return bagAction ~= nil and playerAction ~= nil
+    return bagAction ~= nil
 end
 
 local function isDroppedPartActive(part)
@@ -1953,9 +1952,10 @@ local function storePartInItemBag(part)
 
     equipItemBag()
 
-    local action = getPlayerActionRemote(1)
+    local playerAction = getPlayerActionRemote(0.75)
+    local bagAction = getItemBagDropRemote()
 
-    if not action then
+    if not playerAction and not bagAction then
         return false
     end
 
@@ -1966,7 +1966,17 @@ local function storePartInItemBag(part)
         task.wait(MiningBagStorePositionDelay)
     end
 
-    if not callRemote(action, "Store", part) then
+    local stored = false
+
+    if playerAction then
+        stored = callRemote(playerAction, "Store", part)
+    end
+
+    if not stored and bagAction then
+        stored = callRemote(bagAction, "Store", part)
+    end
+
+    if not stored then
         return false
     end
 
@@ -2091,46 +2101,40 @@ local function moveDroppedOresToBase(origin)
     local useItemBag = canUseItemBagTransport()
     local moved = 0
 
-    if useItemBag then
-        local storedInBag = 0
-
-        local function flushItemBag()
-            if storedInBag <= 0 then
-                return
-            end
-
-            moved = moved + dropItemBagAtBase(moved + 1, storedInBag)
-            storedInBag = 0
-            task.wait(MiningAutoBatchDelay)
-        end
-
-        for _, part in ipairs(parts) do
-            if storePartInItemBag(part) then
-                storedInBag = storedInBag + 1
-
-                if storedInBag >= MiningBagCapacity then
-                    flushItemBag()
-                end
-            end
-        end
-
-        flushItemBag()
-    elseif not GrabHandlerRemote then
-        miningWarn("GrabHandler remote was not found.")
+    if not useItemBag then
+        miningWarn("Item Bag was not found. Ore transport skipped.")
+        return 0
     end
 
-    if not useItemBag then
-        for _, part in ipairs(parts) do
-            local partDestination = getPlotDropPosition(moved + 1, part)
+    local storedInBag = 0
+    local storeAttempts = 0
 
-            if GrabHandlerRemote and partDestination and moveGrabPartToBaseRouted(part, partDestination) then
-                moved = moved + 1
+    local function flushItemBag()
+        if storedInBag <= 0 then
+            return
+        end
 
-                if moved % 10 == 0 then
-                    task.wait(MiningAutoBatchDelay)
-                end
+        moved = moved + dropItemBagAtBase(moved + 1, storedInBag)
+        storedInBag = 0
+        task.wait(MiningAutoBatchDelay)
+    end
+
+    for _, part in ipairs(parts) do
+        storeAttempts = storeAttempts + 1
+
+        if storePartInItemBag(part) then
+            storedInBag = storedInBag + 1
+
+            if storedInBag >= MiningBagCapacity then
+                flushItemBag()
             end
         end
+    end
+
+    flushItemBag()
+
+    if storeAttempts > 0 and moved <= 0 then
+        miningWarn("Item Bag did not store any ore.")
     end
 
     local standPosition = getPlotStandPosition()
