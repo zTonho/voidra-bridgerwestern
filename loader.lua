@@ -716,9 +716,9 @@ local MiningGrabSteps = 8
 local MiningGrabStepDelay = 0.015
 local MiningFinalGrabRepeats = 5
 local MiningDropSettleDelay = 0.12
-local MiningFastGrabRepeats = 3
-local MiningFastGrabDelay = 0.005
-local MiningStorageBatchDelay = 0.01
+local MiningFastGrabRepeats = 2
+local MiningFastGrabDelay = 0.002
+local MiningStorageBatchDelay = 0.004
 local MiningAutoGrabRepeats = 2
 local MiningAutoGrabDelay = 0.002
 local MiningAutoBatchDelay = 0.004
@@ -726,8 +726,7 @@ local MiningDropWaitTimeout = 0.25
 local MiningDropPollDelay = 0.02
 local MiningTargetSettleDelay = 0.03
 local MiningAttackResultDelay = 0.08
-local MiningLocationLoadStepDelay = 0.18
-local MiningLocationLoadCooldown = 8
+local MiningTeleportRefreshDistance = 12
 local MiningBaseDropHeight = 1.75
 local MiningDropSpacing = 5
 local MiningDropMaxColumns = 7
@@ -737,7 +736,6 @@ local MiningSellDropSpacing = 4
 local MiningTierWarningScanRadius = 45
 local MiningMaxChargeMisses = 20
 local LastMiningWarning = 0
-local LastMiningLocationLoad = 0
 
 local OreNames = {
     "Abyssalite",
@@ -928,45 +926,6 @@ local function getPosition(instance)
     return part and part.Position or nil
 end
 
-local function getCFrame(instance)
-    if not instance then
-        return nil
-    end
-
-    if instance:IsA("BasePart") then
-        return instance.CFrame
-    end
-
-    if instance:IsA("Attachment") then
-        return CFrame.new(instance.WorldPosition)
-    end
-
-    if instance:IsA("CFrameValue") then
-        return instance.Value
-    end
-
-    if instance:IsA("Vector3Value") then
-        return CFrame.new(instance.Value)
-    end
-
-    if instance:IsA("ObjectValue") and instance.Value then
-        return getCFrame(instance.Value)
-    end
-
-    if instance:IsA("Model") then
-        local ok, pivot = pcall(function()
-            return instance:GetPivot()
-        end)
-
-        if ok then
-            return pivot
-        end
-    end
-
-    local part = instance:FindFirstChildWhichIsA("BasePart", true)
-    return part and part.CFrame or nil
-end
-
 local function isLikelyChargeGui(object)
     if not isVisibleGui(object) then
         return false
@@ -1047,12 +1006,12 @@ local function hasTierWarningInContainer(container, nearPosition)
     return false
 end
 
-local function hasTierWarningGui(nearPosition)
+local function hasTierWarningGui(nearPosition, ore)
     if hasTierWarningInContainer(getPlayerGui(), nil) then
         return true
     end
 
-    return hasTierWarningInContainer(workspace, nearPosition)
+    return ore and hasTierWarningInContainer(ore, nearPosition) or false
 end
 
 local function waitForChargeGui()
@@ -1519,37 +1478,6 @@ local function getNearestOreTarget(oreFilter)
     return targets[1]
 end
 
-local function getOreLoadLocationFolder()
-    local mouseIgnore = workspace:FindFirstChild("Mouseignore")
-        or workspace:FindFirstChild("MouseIgnore")
-        or workspace:FindFirstChild("mouseignore")
-
-    return mouseIgnore and mouseIgnore:FindFirstChild("Locations") or nil
-end
-
-local function getOreLoadCFrames()
-    local locations = getOreLoadLocationFolder()
-    local cframes = {}
-
-    if not locations then
-        return cframes
-    end
-
-    for _, location in ipairs(locations:GetChildren()) do
-        local cframe = getCFrame(location)
-
-        if cframe then
-            cframes[#cframes + 1] = cframe
-        end
-    end
-
-    table.sort(cframes, function(a, b)
-        return tostring(a.Position) < tostring(b.Position)
-    end)
-
-    return cframes
-end
-
 local function getGrabPart(object)
     if not object then
         return nil
@@ -1816,6 +1744,8 @@ local function moveDroppedOresToBase(origin)
     local root = getRoot()
     if root and standPosition then
         root.CFrame = CFrame.new(standPosition)
+        root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+        root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
     end
 
     return moved
@@ -1872,7 +1802,7 @@ local function sellBaseOres()
         return 0
     end
 
-    task.wait(0.2)
+    task.wait(0.08)
 
     if talkToSellary() then
         miningNotify("Ore sold successfully.")
@@ -1924,25 +1854,19 @@ local function bringSafeOresToPlayer()
     return moved
 end
 
-local function teleportNear(position)
+local function teleportNear(position, force)
     local root = getRoot()
 
     if not root then
         return false
     end
 
-    root.CFrame = CFrame.new(position + Vector3.new(0, MiningTeleportOffset, 0))
-    return true
-end
-
-local function teleportToLoadCFrame(cframe)
-    local root = getRoot()
-
-    if not root or not cframe then
-        return false
+    if force or (root.Position - position).Magnitude > MiningTeleportRefreshDistance then
+        root.CFrame = CFrame.new(position + Vector3.new(0, MiningTeleportOffset, 0))
+        root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+        root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
     end
 
-    root.CFrame = cframe + Vector3.new(0, MiningTeleportOffset, 0)
     return true
 end
 
@@ -1956,38 +1880,6 @@ local function canContinueMining(stopWhenToggleOff)
     end
 
     return true
-end
-
-local function loadOreLocations(stopWhenToggleOff, force)
-    if not force and os.clock() - LastMiningLocationLoad < MiningLocationLoadCooldown then
-        return 0
-    end
-
-    local cframes = getOreLoadCFrames()
-
-    if #cframes == 0 then
-        return 0
-    end
-
-    LastMiningLocationLoad = os.clock()
-    miningNotify("Loading ores...")
-
-    local visited = 0
-
-    for _, cframe in ipairs(cframes) do
-        if not canContinueMining(stopWhenToggleOff) then
-            break
-        end
-
-        if not teleportToLoadCFrame(cframe) then
-            break
-        end
-
-        visited = visited + 1
-        task.wait(MiningLocationLoadStepDelay)
-    end
-
-    return visited
 end
 
 local function refreshOreEntry(entry)
@@ -2029,7 +1921,7 @@ local function mineTarget(entry, stopWhenToggleOff, stopOnUnequip)
         return false
     end
 
-    if not teleportNear(entry.HitPosition) then
+    if not teleportNear(entry.HitPosition, true) then
         miningNotify("Character root was not found.")
         return false
     end
@@ -2115,7 +2007,7 @@ local function mineTarget(entry, stopWhenToggleOff, stopOnUnequip)
 
             task.wait(MiningAttackResultDelay)
 
-            if hasTierWarningGui(entry.HitPosition) then
+            if hasTierWarningGui(entry.HitPosition, entry.Ore) then
                 miningNotify("Pickaxe is too weak for this ore.")
                 break
             end
@@ -2138,13 +2030,8 @@ local function mineTarget(entry, stopWhenToggleOff, stopOnUnequip)
     return hits > 0 and not isOreAlive(entry.Ore), dropOrigin
 end
 
-local function mineOneOre(stopWhenToggleOff, stopOnUnequip, allowLocationLoad)
+local function mineOneOre(stopWhenToggleOff, stopOnUnequip)
     local entry = getNearestOreTarget(MiningState.SelectedOre)
-
-    if not entry and allowLocationLoad then
-        loadOreLocations(stopWhenToggleOff, not stopWhenToggleOff)
-        entry = getNearestOreTarget(MiningState.SelectedOre)
-    end
 
     if not entry then
         if not stopWhenToggleOff then
@@ -2178,7 +2065,7 @@ MiningBox:AddButton({
     Func = function()
         task.spawn(function()
             MiningState.StopRequested = false
-            mineOneOre(false, true, true)
+            mineOneOre(false, true)
         end)
     end,
 })
@@ -2222,7 +2109,7 @@ Toggles.MiningAutoFarm:OnChanged(function(enabled)
 
     task.spawn(function()
         while Toggles.MiningAutoFarm and Toggles.MiningAutoFarm.Value and not MiningState.StopRequested do
-            local mined = mineOneOre(true, false, true)
+            local mined = mineOneOre(true, false)
 
             if not mined then
                 task.wait(MiningIdleDelay)
