@@ -721,6 +721,7 @@ local MiningFastGrabDelay = 0.002
 local MiningStorageBatchDelay = 0.004
 local MiningAutoGrabRepeats = 2
 local MiningAutoGrabDelay = 0.002
+local MiningAutoLiftHeight = 85
 local MiningAutoBatchDelay = 0.004
 local MiningDropWaitTimeout = 0.25
 local MiningDropPollDelay = 0.02
@@ -1697,7 +1698,7 @@ local function moveGrabPartToBase(part, destination)
     return moved
 end
 
-local function moveGrabPartFast(part, destination, repeats, delay)
+local function moveGrabPartFast(part, destination, repeats, delay, liftHeight)
     if not part or not part.Parent or not destination then
         return false
     end
@@ -1714,19 +1715,30 @@ local function moveGrabPartFast(part, destination, repeats, delay)
     local moved = callGrabHandler(part, "Grab", startPosition)
     task.wait(delay)
 
-    for _ = 1, repeats do
-        if not part.Parent then
-            break
+    local waypoints = {}
+
+    if liftHeight and liftHeight > 0 then
+        waypoints[#waypoints + 1] = startPosition + Vector3.new(0, liftHeight, 0)
+        waypoints[#waypoints + 1] = Vector3.new(destination.X, destination.Y + liftHeight, destination.Z)
+    end
+
+    waypoints[#waypoints + 1] = destination
+
+    for _, waypoint in ipairs(waypoints) do
+        for _ = 1, repeats do
+            if not part.Parent then
+                break
+            end
+
+            pcall(function()
+                part.CFrame = CFrame.new(waypoint)
+                part.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+                part.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+            end)
+
+            moved = callGrabHandler(part, "Grab", waypoint) or moved
+            task.wait(delay)
         end
-
-        pcall(function()
-            part.CFrame = CFrame.new(destination)
-            part.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-            part.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
-        end)
-
-        moved = callGrabHandler(part, "Grab", destination) or moved
-        task.wait(delay)
     end
 
     callGrabHandler(part, "Ungrab")
@@ -1751,7 +1763,7 @@ local function moveDroppedOresToBase(origin)
     for _, part in ipairs(waitForDroppedOreParts(origin)) do
         local partDestination = getPlotDropPosition(moved + 1, part)
 
-        if partDestination and moveGrabPartFast(part, partDestination, MiningAutoGrabRepeats, MiningAutoGrabDelay) then
+        if partDestination and moveGrabPartFast(part, partDestination, MiningAutoGrabRepeats, MiningAutoGrabDelay, MiningAutoLiftHeight) then
             moved = moved + 1
 
             if moved % 10 == 0 then
@@ -2028,6 +2040,7 @@ local function mineTarget(entry, stopWhenToggleOff, stopOnUnequip)
     local hits = 0
     local dropOrigin = entry.HitPosition
     local chargeMisses = 0
+    local lastTarget = nil
 
     while canContinueMining(stopWhenToggleOff) and hits < MiningMaxHitsPerOre and isOreAlive(entry.Ore) and refreshOreEntry(entry) do
         if shouldStopForUnequip() then
@@ -2035,7 +2048,9 @@ local function mineTarget(entry, stopWhenToggleOff, stopOnUnequip)
             break
         end
 
-        teleportNear(entry.HitPosition)
+        local targetChanged = entry.Target ~= lastTarget
+        teleportNear(entry.HitPosition, targetChanged)
+        lastTarget = entry.Target
         dropOrigin = entry.HitPosition
         task.wait(MiningTargetSettleDelay)
 
