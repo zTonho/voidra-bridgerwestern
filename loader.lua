@@ -726,8 +726,11 @@ local MiningDropWaitTimeout = 0.25
 local MiningDropPollDelay = 0.02
 local MiningTargetSettleDelay = 0.03
 local MiningAttackResultDelay = 0.08
-local MiningOreLoadTimeout = 2
-local MiningOreLoadPollDelay = 0.05
+local MiningMapLoadStepDelay = 0.18
+local MiningMapLoadCooldown = 8
+local MiningMapLoadMinDistance = 180
+local MiningMapLoadMaxPoints = 80
+local MiningMapLoadGridSpacing = 320
 local MiningBaseDropHeight = 1.75
 local MiningDropSpacing = 5
 local MiningDropMaxColumns = 7
@@ -737,6 +740,7 @@ local MiningSellDropSpacing = 4
 local MiningTierWarningScanRadius = 45
 local MiningMaxChargeMisses = 20
 local LastMiningWarning = 0
+local LastMiningMapLoad = 0
 
 local OreNames = {
     "Abyssalite",
@@ -1365,32 +1369,25 @@ local function setToolInput(active, pickaxe)
     end
 end
 
-local function getOrePivotPosition(ore)
-    return getPosition(ore)
-end
-
-local function addOreTarget(targets, ore, target, position)
-    local key = target or ore
-
-    if targets.Seen and targets.Seen[key] then
+local function addOreTarget(targets, ore, target)
+    if targets.Seen and targets.Seen[target] then
         return
     end
 
-    position = position or getPosition(target) or getOrePivotPosition(ore)
+    local position = getPosition(target)
 
     if not position then
         return
     end
 
     if targets.Seen then
-        targets.Seen[key] = true
+        targets.Seen[target] = true
     end
 
     targets[#targets + 1] = {
         Ore = ore,
         Target = target,
         HitPosition = position,
-        PivotPosition = getOrePivotPosition(ore) or position,
     }
 end
 
@@ -1419,15 +1416,14 @@ local function findOreTarget(ore)
 end
 
 local function isOreAlive(ore)
-    return ore and ore.Parent == getOresFolder() and getOrePivotPosition(ore) ~= nil
+    return ore and ore.Parent == getOresFolder() and findOreTarget(ore) ~= nil
 end
 
 local function collectTargetsFromOre(targets, ore)
     local target = findOreTarget(ore)
-    local position = target and getPosition(target) or getOrePivotPosition(ore)
 
-    if position then
-        addOreTarget(targets, ore, target, position)
+    if target then
+        addOreTarget(targets, ore, target)
     end
 end
 
@@ -1485,6 +1481,122 @@ end
 local function getNearestOreTarget(oreFilter)
     local targets = getOreTargets(oreFilter)
     return targets[1]
+end
+
+local function getContainerBounds(container)
+    if not container then
+        return nil, nil
+    end
+
+    if container:IsA("BasePart") then
+        return container.Position, container.Size
+    end
+
+    if container:IsA("Model") then
+        local ok, boundsCFrame, boundsSize = pcall(function()
+            return container:GetBoundingBox()
+        end)
+
+        if ok and boundsCFrame and boundsSize then
+            return boundsCFrame.Position, boundsSize
+        end
+    end
+
+    local minPosition = Vector3.new(math.huge, math.huge, math.huge)
+    local maxPosition = Vector3.new(-math.huge, -math.huge, -math.huge)
+    local found = false
+
+    for _, object in ipairs(container:GetDescendants()) do
+        if object:IsA("BasePart") then
+            local halfSize = object.Size / 2
+            local low = object.Position - halfSize
+            local high = object.Position + halfSize
+
+            minPosition = Vector3.new(
+                math.min(minPosition.X, low.X),
+                math.min(minPosition.Y, low.Y),
+                math.min(minPosition.Z, low.Z)
+            )
+
+            maxPosition = Vector3.new(
+                math.max(maxPosition.X, high.X),
+                math.max(maxPosition.Y, high.Y),
+                math.max(maxPosition.Z, high.Z)
+            )
+
+            found = true
+        end
+    end
+
+    if not found then
+        return nil, nil
+    end
+
+    return (minPosition + maxPosition) / 2, maxPosition - minPosition
+end
+
+local function addMapLoadPoint(points, position)
+    if not position then
+        return
+    end
+
+    for _, existing in ipairs(points) do
+        if (existing - position).Magnitude < MiningMapLoadMinDistance then
+            return
+        end
+    end
+
+    points[#points + 1] = position
+end
+
+local function getMapLoadPoints(oreFilter)
+    local points = {}
+    local oresFolder = getOresFolder()
+
+    if oresFolder then
+        for _, ore in ipairs(oresFolder:GetChildren()) do
+            local oreName = normalizeOreName(ore.Name)
+
+            if oreName and oreName == oreFilter then
+                addMapLoadPoint(points, getPosition(ore))
+            end
+        end
+    end
+
+    if #points < 3 then
+        local loadSource = workspace:FindFirstChild("WorldSpawn")
+            or workspace:FindFirstChild("Map")
+            or oresFolder
+        local center, size = getContainerBounds(loadSource)
+        local root = getRoot()
+        local y = root and root.Position.Y or (center and center.Y) or 0
+
+        if center and size then
+            local halfX = math.min(size.X / 2, MiningMapLoadGridSpacing * 4)
+            local halfZ = math.min(size.Z / 2, MiningMapLoadGridSpacing * 4)
+
+            for x = center.X - halfX, center.X + halfX, MiningMapLoadGridSpacing do
+                for z = center.Z - halfZ, center.Z + halfZ, MiningMapLoadGridSpacing do
+                    addMapLoadPoint(points, Vector3.new(x, y, z))
+                end
+            end
+        end
+    end
+
+    local root = getRoot()
+    local rootPosition = root and root.Position
+
+    if rootPosition then
+        table.sort(points, function(a, b)
+            return (a - rootPosition).Magnitude < (b - rootPosition).Magnitude
+        end)
+    end
+
+    while #points > MiningMapLoadMaxPoints do
+        table.remove(points)
+    end
+
+    return points
 end
 
 local function getGrabPart(object)
@@ -1884,7 +1996,55 @@ local function canContinueMining(stopWhenToggleOff)
     return true
 end
 
-local function refreshOreEntry(entry, allowPivotOnly)
+local function loadOreAreas(oreFilter, stopWhenToggleOff, force)
+    if not force and os.clock() - LastMiningMapLoad < MiningMapLoadCooldown then
+        return 0
+    end
+
+    local root = getRoot()
+
+    if not root then
+        miningNotify("Character root was not found.")
+        return 0
+    end
+
+    local points = getMapLoadPoints(oreFilter)
+
+    if #points == 0 then
+        miningWarn("No map load points found.")
+        return 0
+    end
+
+    LastMiningMapLoad = os.clock()
+    miningNotify("Loading ores...")
+
+    local visited = 0
+
+    for _, position in ipairs(points) do
+        if not canContinueMining(stopWhenToggleOff) then
+            break
+        end
+
+        if not teleportNear(position) then
+            break
+        end
+
+        visited = visited + 1
+        task.wait(MiningMapLoadStepDelay)
+
+        if not force and #getOreTargets(oreFilter) > 0 then
+            break
+        end
+    end
+
+    if visited > 0 then
+        miningNotify("Ores loaded.")
+    end
+
+    return visited
+end
+
+local function refreshOreEntry(entry)
     if not entry or not entry.Ore or not entry.Ore.Parent then
         return false
     end
@@ -1896,18 +2056,6 @@ local function refreshOreEntry(entry, allowPivotOnly)
         if position then
             entry.Target = target
             entry.HitPosition = position
-            entry.PivotPosition = getOrePivotPosition(entry.Ore) or position
-            return true
-        end
-    end
-
-    if allowPivotOnly then
-        local position = getOrePivotPosition(entry.Ore)
-
-        if position then
-            entry.Target = nil
-            entry.HitPosition = position
-            entry.PivotPosition = position
             return true
         end
     end
@@ -1916,7 +2064,7 @@ local function refreshOreEntry(entry, allowPivotOnly)
 end
 
 local function mineTarget(entry, stopWhenToggleOff, stopOnUnequip)
-    if not refreshOreEntry(entry, true) then
+    if not refreshOreEntry(entry) then
         return false
     end
 
@@ -1971,85 +2119,63 @@ local function mineTarget(entry, stopWhenToggleOff, stopOnUnequip)
     local hits = 0
     local dropOrigin = entry.HitPosition
     local chargeMisses = 0
-    local oreLoadStarted = os.clock()
 
-    while canContinueMining(stopWhenToggleOff) and hits < MiningMaxHitsPerOre and isOreAlive(entry.Ore) and refreshOreEntry(entry, true) do
+    while canContinueMining(stopWhenToggleOff) and hits < MiningMaxHitsPerOre and isOreAlive(entry.Ore) and refreshOreEntry(entry) do
         if shouldStopForUnequip() then
             miningNotify("Get ore stopped: pickaxe unequipped.")
             break
         end
 
-        if not entry.Target then
-            if hits > 0 then
+        teleportNear(entry.HitPosition)
+        dropOrigin = entry.HitPosition
+        task.wait(MiningTargetSettleDelay)
+
+        if shouldStopForUnequip() then
+            miningNotify("Get ore stopped: pickaxe unequipped.")
+            break
+        end
+
+        ChargeRemote:FireServer({
+            Target = entry.Target,
+            HitPosition = entry.HitPosition,
+        })
+
+        if not waitForChargeGui() then
+            miningWarn("Charge did not start. Pickaxe may be on cooldown.")
+            task.wait(MiningCooldownDelay)
+            chargeMisses = chargeMisses + 1
+
+            if chargeMisses >= maxChargeMisses then
+                if stopOnUnequip then
+                    miningNotify("Get ore stopped: charge did not start.")
+                end
+
                 break
             end
-
-            teleportNear(entry.HitPosition)
-
-            if os.clock() - oreLoadStarted >= MiningOreLoadTimeout then
-                miningWarn("Ore did not load. Moving to the next ore.")
-                break
-            end
-
-            task.wait(MiningOreLoadPollDelay)
         else
-            oreLoadStarted = os.clock()
-            teleportNear(entry.HitPosition)
-            dropOrigin = entry.HitPosition
-            task.wait(MiningTargetSettleDelay)
+            chargeMisses = 0
+
+            task.wait(MiningChargeTime)
 
             if shouldStopForUnequip() then
                 miningNotify("Get ore stopped: pickaxe unequipped.")
                 break
             end
 
-            ChargeRemote:FireServer({
-                Target = entry.Target,
-                HitPosition = entry.HitPosition,
+            AttackRemote:FireServer({
+                Alpha = 1,
+                ResponseTime = MiningChargeTime,
             })
 
-            if not waitForChargeGui() then
-                miningWarn("Charge did not start. Pickaxe may be on cooldown.")
-                task.wait(MiningCooldownDelay)
-                chargeMisses = chargeMisses + 1
+            task.wait(MiningAttackResultDelay)
 
-                if chargeMisses >= maxChargeMisses then
-                    if stopOnUnequip then
-                        miningNotify("Get ore stopped: charge did not start.")
-                    end
-
-                    break
-                end
-            else
-                chargeMisses = 0
-
-                task.wait(MiningChargeTime)
-
-                if shouldStopForUnequip() then
-                    miningNotify("Get ore stopped: pickaxe unequipped.")
-                    break
-                end
-
-                AttackRemote:FireServer({
-                    Alpha = 1,
-                    ResponseTime = MiningChargeTime,
-                })
-
-                task.wait(MiningAttackResultDelay)
-
-                if hasTierWarningGui(entry.HitPosition) then
-                    miningNotify("Pickaxe is too weak for this ore.")
-                    break
-                end
-
-                hits = hits + 1
-
-                if not findOreTarget(entry.Ore) then
-                    break
-                end
-
-                task.wait(MiningActionDelay)
+            if hasTierWarningGui(entry.HitPosition) then
+                miningNotify("Pickaxe is too weak for this ore.")
+                break
             end
+
+            hits = hits + 1
+            task.wait(MiningActionDelay)
         end
     end
 
@@ -2059,18 +2185,26 @@ local function mineTarget(entry, stopWhenToggleOff, stopOnUnequip)
 
     setToolInput(false, pickaxe)
 
-    if hits >= MiningMaxHitsPerOre and findOreTarget(entry.Ore) then
+    if hits >= MiningMaxHitsPerOre and isOreAlive(entry.Ore) then
         miningNotify("Skipped ore: pickaxe tier may be too low.")
     end
 
-    return hits > 0 and not findOreTarget(entry.Ore), dropOrigin
+    return hits > 0 and not isOreAlive(entry.Ore), dropOrigin
 end
 
-local function mineOneOre(stopWhenToggleOff, stopOnUnequip)
+local function mineOneOre(stopWhenToggleOff, stopOnUnequip, allowMapLoad)
     local entry = getNearestOreTarget(MiningState.SelectedOre)
 
+    if not entry and allowMapLoad then
+        loadOreAreas(MiningState.SelectedOre, stopWhenToggleOff, false)
+        entry = getNearestOreTarget(MiningState.SelectedOre)
+    end
+
     if not entry then
-        miningNotify("No ore target found.")
+        if not stopWhenToggleOff then
+            miningNotify("No ore target found.")
+        end
+
         return false
     end
 
@@ -2098,7 +2232,20 @@ MiningBox:AddButton({
     Func = function()
         task.spawn(function()
             MiningState.StopRequested = false
-            mineOneOre(false, true)
+            mineOneOre(false, true, true)
+        end)
+    end,
+})
+
+MiningBox:AddButton({
+    Text = "Load ore areas",
+    Func = function()
+        task.spawn(function()
+            local visited = loadOreAreas(MiningState.SelectedOre, false, true)
+
+            if visited == 0 then
+                miningNotify("No ore load points visited.")
+            end
         end)
     end,
 })
@@ -2142,7 +2289,7 @@ Toggles.MiningAutoFarm:OnChanged(function(enabled)
 
     task.spawn(function()
         while Toggles.MiningAutoFarm and Toggles.MiningAutoFarm.Value and not MiningState.StopRequested do
-            local mined = mineOneOre(true, false)
+            local mined = mineOneOre(true, false, true)
 
             if not mined then
                 task.wait(MiningIdleDelay)
