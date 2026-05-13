@@ -735,7 +735,8 @@ local MiningBagDropDelay = 0.12
 local MiningBagStoreHeight = 3
 local MiningBagCollectionPasses = 12
 local MiningBagCollectionPassDelay = 0.12
-local MiningBagDropExtraCalls = 3
+local MiningBagDropExtraCalls = 6
+local MiningBagFinalDropCalls = 4
 local MiningBagReturnDelay = 0.16
 local MiningGrabReleaseRepeats = 6
 local MiningGrabReleaseDelay = 0.04
@@ -2033,6 +2034,27 @@ local function dropItemBagAtBase(startSlot, amount)
     return amount
 end
 
+local function clearItemBagAtBase(startSlot)
+    local destination = getPlotDropPosition(startSlot)
+
+    if not destination then
+        return
+    end
+
+    setCharacterExactAt(destination + Vector3.new(0, 2.5, 0))
+    task.wait(MiningBagDropDelay)
+
+    for _ = 1, MiningBagFinalDropCalls do
+        local action = getEquippedItemBagAction()
+
+        if action then
+            callRemote(action, "Drop")
+        end
+
+        task.wait(MiningBagDropDelay)
+    end
+end
+
 local function moveGrabPartToBaseRouted(part, destination)
     if not part or not part.Parent or not destination then
         return false
@@ -2130,7 +2152,9 @@ local function moveDroppedOresToBase(origin)
             return
         end
 
-        moved = moved + dropItemBagAtBase(moved + 1, storedInBag)
+        local nextSlot = moved + 1
+        moved = moved + dropItemBagAtBase(nextSlot, storedInBag)
+        clearItemBagAtBase(moved + 1)
         storedInBag = 0
         task.wait(MiningAutoBatchDelay)
 
