@@ -222,7 +222,6 @@ local FishingCatchingSettleDelay = 0.015
 local FishingPostReelDelay = 0.005
 local FishingCycleDelay = 0.005
 local FishingIdleDelay = 0.2
-local FishingHotspotHoverHeight = 9
 local FishingBaseTeleportOffset = 5
 local FishingBaseDropSpacing = 4
 local FishingBaseDropHeight = 1.25
@@ -618,7 +617,7 @@ local function getFishingCastData()
     end
 
     if hotspotPosition then
-        return hotspotPosition + Vector3.new(0, FishingHotspotHoverHeight, 0),
+        return FishingSpotPosition,
             CFrame.new(hotspotPosition) * FishingCastRotation,
             true
     end
