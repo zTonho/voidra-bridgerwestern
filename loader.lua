@@ -179,6 +179,16 @@ MenuBox:AddLabel("Menu keybind"):AddKeyPicker("MenuKeybind", {
 Library.ToggleKeybind = Options.MenuKeybind
 
 local cleanup = function() end
+local unloadVoidra
+
+MenuBox:AddButton({
+    Text = "Unload",
+    Func = function()
+        if unloadVoidra then
+            unloadVoidra()
+        end
+    end,
+})
 
 local MovementOk, MovementError = pcall(function()
 local Players = game:GetService("Players")
@@ -2794,6 +2804,18 @@ Library:Notify({
     Description = "Loaded successfully.",
     Time = 4,
 })
+
+unloadVoidra = function()
+    cleanup()
+
+    if Library and type(Library.Unload) == "function" then
+        Library:Unload()
+    end
+
+    if env.Voidra then
+        env.Voidra = nil
+    end
+end
 
 env.Voidra = {
     Library = Library,
