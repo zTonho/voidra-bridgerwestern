@@ -2597,6 +2597,13 @@ TeleportsBox:AddButton({
     end,
 })
 
+TeleportsBox:AddButton({
+    Text = "Vi's Lab",
+    Func = function()
+        teleportToLocation(Vector3.new(-4446.63, -195.77, -2029.90), "Vi's Lab")
+    end,
+})
+
 local function teleportNear(position, force)
     local root = getRoot()
 
