@@ -206,25 +206,30 @@ local FishingState = State.Fishing
 local FishingSpotPosition = Vector3.new(1768.35, 3.03, -1398.29)
 local FishingCastCFrame = CFrame.new(1743.9234619140625, -5.975002288818359, -1410.97705078125, -0, 1, -0, -0, 0, -1, -1, 0, -0)
 local FishingCastRotation = CFrame.new(0, 0, 0, -0, 1, -0, -0, 0, -1, -1, 0, -0)
-local FishingAttackAlpha = 0.9614042639732361
-local FishingAttackResponseTime = 1.2988306999977794
-local FishingCastAttackDelay = 0.05
-local FishingLineLandDelay = 1.15
-local FishingReelWaitTimeout = 20
-local FishingReelPollDelay = 0.05
-local FishingReelHitDelay = 0.01
-local FishingReelHitRepeats = 20
-local FishingReelEndRepeats = 1
-local FishingCycleDelay = 0.45
-local FishingIdleDelay = 2
+local FishingAttackAlpha = 1
+local FishingAttackResponseTime = 0.75
+local FishingCastAttackDelay = 0.04
+local FishingLineLandDelay = 0.85
+local FishingReelWaitTimeout = 14
+local FishingReelPollDelay = 0.035
+local FishingReelHitDelay = 0.004
+local FishingReelHitRepeats = 34
+local FishingReelEndRepeats = 2
+local FishingCycleDelay = 0.2
+local FishingIdleDelay = 0.9
 local FishingHotspotHoverHeight = 9
 local FishingBaseTeleportOffset = 5
-local FishingSellAfterCatchDelay = 0.35
+local FishingCatchSpawnTimeout = 2.5
+local FishingCatchPollDelay = 0.04
+local FishingHeldDropDelay = 0.22
+local FishingSellAfterCatchDelay = 0.05
 local FishingSellDropSpacing = 4
-local FishingSellMoveRepeats = 10
-local FishingSellStepDelay = 0.006
-local FishingSellSettleDelay = 0.35
+local FishingSellMoveRepeats = 5
+local FishingSellStepDelay = 0.003
+local FishingSellSettleDelay = 0.2
+local FishingSellDealRepeats = 3
 local FishingHoverMover = nil
+local getCatchParts
 local LastFishingHotspotWarning = 0
 local FishingHotspotWarningCooldown = 4
 
@@ -642,6 +647,37 @@ local function waitForFishingReel(singleRun)
     return false
 end
 
+local function countFishingCatches()
+    if type(getCatchParts) ~= "function" then
+        return 0
+    end
+
+    return #getCatchParts()
+end
+
+local function recallFishingLine()
+    local chargeRemote = getEventsChild("Tools", "Charge")
+
+    if chargeRemote then
+        mainCallRemote(chargeRemote, {})
+        task.wait(0.12)
+    end
+end
+
+local function waitForFishingCatch(previousCount, singleRun)
+    local startedAt = os.clock()
+
+    while canContinueFishing(singleRun) and os.clock() - startedAt < FishingCatchSpawnTimeout do
+        if countFishingCatches() > previousCount then
+            return true
+        end
+
+        task.wait(FishingCatchPollDelay)
+    end
+
+    return countFishingCatches() > previousCount
+end
+
 local function runFishingCycle(singleRun)
     local chargeRemote = getEventsChild("Tools", "Charge")
     local attackRemote = getEventsChild("Tools", "Attack")
@@ -671,6 +707,8 @@ local function runFishingCycle(singleRun)
         return false
     end
 
+    local catchCountBefore = countFishingCatches()
+
     mainCallRemote(chargeRemote, {
         HitPosition = castCFrame,
     })
@@ -687,6 +725,7 @@ local function runFishingCycle(singleRun)
     task.wait(FishingLineLandDelay)
 
     if not waitForFishingReel(singleRun) then
+        recallFishingLine()
         return false
     end
 
@@ -710,7 +749,7 @@ local function runFishingCycle(singleRun)
         mainCallRemote(reelEndRemote)
     end
 
-    return true
+    return waitForFishingCatch(catchCountBefore, singleRun)
 end
 
 local function getNauticSellary()
@@ -834,7 +873,28 @@ local function setCatchAt(part, root, position)
     end)
 end
 
-local function getCatchParts()
+local function detachCatchLocal(root)
+    if not root then
+        return
+    end
+
+    pcall(function()
+        for _, object in ipairs(root:GetDescendants()) do
+            if object.Name == "_CatchWeld" or object.Name == "_CatchAttachment" then
+                object:Destroy()
+            elseif object:IsA("BasePart") then
+                object.Anchored = false
+                object.Massless = false
+                object.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+                object.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+            end
+        end
+
+        root:SetAttribute("Grabbed", nil)
+    end)
+end
+
+function getCatchParts()
     local parts = {}
     local seen = {}
 
@@ -855,6 +915,27 @@ local function getCatchParts()
     return parts
 end
 
+local function isCatchHeld(entry)
+    local character = getMainCharacter()
+
+    return character
+        and entry
+        and (
+            (entry.Root and entry.Root:IsDescendantOf(character))
+            or (entry.Part and entry.Part:IsDescendantOf(character))
+        )
+end
+
+local function hasHeldFishingCatch()
+    for _, entry in ipairs(getCatchParts()) do
+        if isCatchHeld(entry) then
+            return true
+        end
+    end
+
+    return false
+end
+
 local function moveCatchToSell(entry, destination)
     local grabHandler = getGrabHandlerRemote()
 
@@ -864,6 +945,8 @@ local function moveCatchToSell(entry, destination)
 
     local part = entry.Part
     local root = entry.Root
+    detachCatchLocal(root)
+
     local startPosition = getMainPosition(root) or getMainPosition(part)
 
     if not startPosition then
@@ -871,6 +954,8 @@ local function moveCatchToSell(entry, destination)
     end
 
     local moved = mainCallRemote(grabHandler, part, "Grab", startPosition)
+    setCatchAt(part, root, destination)
+    moved = mainCallRemote(grabHandler, part, "Grab", destination) or moved
     task.wait(FishingSellStepDelay)
 
     for i = 1, FishingSellMoveRepeats do
@@ -890,22 +975,43 @@ local function moveCatchToSell(entry, destination)
     return moved
 end
 
-local function dropHeldFishCatch()
+local function dropHeldFishCatchAt(position)
     local chargeRemote = getEventsChild("Tools", "Charge")
 
-    if chargeRemote then
-        mainCallRemote(chargeRemote, {})
-        task.wait(0.2)
+    if not chargeRemote or not position or not hasHeldFishingCatch() then
+        return false
     end
+
+    stopFishingHover()
+    setMainCharacterAt(position)
+    task.wait(0.08)
+    mainCallRemote(chargeRemote, {})
+    task.wait(FishingHeldDropDelay)
+    return true
+end
+
+local function storeFishCatchesAtBase()
+    local position = getMainPlotStandPosition()
+
+    if not position then
+        finishFishingAtBase()
+        return false
+    end
+
+    dropHeldFishCatchAt(position)
+    finishFishingAtBase()
+    return true
 end
 
 local function sellFishCatches()
-    if not getFishSellDropPosition(1) then
+    local firstDropPosition = getFishSellDropPosition(1)
+
+    if not firstDropPosition then
         mainNotify("Nautic sell zone was not found.")
         return 0
     end
 
-    dropHeldFishCatch()
+    dropHeldFishCatchAt(firstDropPosition)
 
     local catches = getCatchParts()
 
@@ -934,7 +1040,11 @@ local function sellFishCatches()
     local interact = getNauticSellaryInteract()
 
     if interact then
-        mainCallRemote(interact, "Deal", 1)
+        for _ = 1, FishingSellDealRepeats do
+            mainCallRemote(interact, "Deal", 1)
+            task.wait(0.08)
+        end
+
         mainNotify("Fish sold successfully.")
     else
         mainNotify("Nautic Sellary was not found.")
@@ -966,7 +1076,16 @@ FishingBox:AddButton({
                 mainNotify("Fish once failed. Check console.")
             end
 
-            finishFishingAtBase()
+            local cycleOk = ok and result == true
+
+            if cycleOk and FishingState.AutoSell then
+                sellFishCatches()
+                finishFishingAtBase()
+            elseif cycleOk then
+                storeFishCatchesAtBase()
+            else
+                finishFishingAtBase()
+            end
         end)
     end,
 })
@@ -1043,6 +1162,8 @@ Toggles.FishingAutoFish:OnChanged(function(enabled)
             if cycleOk and FishingState.AutoSell then
                 task.wait(FishingSellAfterCatchDelay)
                 sellFishCatches()
+            elseif cycleOk then
+                storeFishCatchesAtBase()
             end
 
             task.wait(cycleOk and FishingCycleDelay or FishingIdleDelay)
