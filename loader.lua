@@ -191,9 +191,7 @@ MenuBox:AddButton({
 })
 
 local MainOk, MainError = pcall(function()
-local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local LocalPlayer = Players.LocalPlayer or Players.PlayerAdded:Wait()
 
 local function mainNotify(description)
     Library:Notify({
@@ -236,145 +234,6 @@ local function claimQuestReward(questName, rewardName)
     end
 end
 
-local function callMainRemote(remote, ...)
-    if not remote then
-        return false
-    end
-
-    local args = { ... }
-    local ok = pcall(function()
-        if remote:IsA("RemoteFunction") then
-            remote:InvokeServer(unpack(args))
-        else
-            remote:FireServer(unpack(args))
-        end
-    end)
-
-    return ok
-end
-
-local function getAssemblerInteract()
-    local map = workspace:FindFirstChild("Map")
-    local structures = map and map:FindFirstChild("Structures")
-    local lab = structures and structures:FindFirstChild("Vi's Lab")
-    local objects = lab and lab:FindFirstChild("Objects")
-    local assembler = objects and objects:FindFirstChild("Assembler")
-    local lower = assembler and assembler:FindFirstChild("Lower")
-    local plate = lower and lower:FindFirstChild("Plate")
-
-    return plate and plate:FindFirstChild("Interact") or nil
-end
-
-local function getUpdateToolIndexRemote()
-    local events = ReplicatedStorage:FindFirstChild("Events")
-    return events and events:FindFirstChild("UpdateToolIndex") or nil
-end
-
-local function findTool(toolName)
-    local backpack = LocalPlayer:FindFirstChildOfClass("Backpack")
-    local containers = {
-        LocalPlayer,
-        backpack,
-        LocalPlayer.Character,
-    }
-
-    for _, container in ipairs(containers) do
-        if container then
-            local direct = container:FindFirstChild(toolName)
-
-            if direct and direct:IsA("Tool") then
-                return direct
-            end
-
-            for _, descendant in ipairs(container:GetDescendants()) do
-                if descendant:IsA("Tool") and descendant.Name == toolName then
-                    return descendant
-                end
-            end
-        end
-    end
-
-    if type(getnilinstances) == "function" then
-        for _, instance in next, getnilinstances() do
-            if instance:IsA("Tool") and instance.Name == toolName then
-                return instance
-            end
-        end
-    end
-
-    return nil
-end
-
-local function waitForTool(toolName, timeout)
-    local startedAt = os.clock()
-    local tool = findTool(toolName)
-
-    while not tool and os.clock() - startedAt < timeout do
-        task.wait(0.1)
-        tool = findTool(toolName)
-    end
-
-    return tool
-end
-
-local function buildToolIndexPayload()
-    local order = {
-        { Name = "Hammer", Index = 1 },
-        { Name = "Item Bag", Index = 2 },
-        { Name = "Overgrown Pickaxe", Index = 3 },
-        { Name = "Proton-24", Index = 4 },
-    }
-    local payload = {}
-
-    for _, entry in ipairs(order) do
-        local tool = findTool(entry.Name)
-
-        if tool then
-            payload[#payload + 1] = {
-                Tool = tool,
-                Index = entry.Index,
-            }
-        end
-    end
-
-    return payload
-end
-
-local function claimProton24()
-    local interact = getAssemblerInteract()
-
-    if not interact then
-        mainNotify("Assembler interact was not found.")
-        return
-    end
-
-    if not callMainRemote(interact) then
-        mainNotify("Assembler claim failed.")
-        return
-    end
-
-    local proton = waitForTool("Proton-24", 1.5)
-    local updateToolIndex = getUpdateToolIndexRemote()
-
-    if updateToolIndex then
-        for _ = 1, 2 do
-            local payload = buildToolIndexPayload()
-
-            if #payload > 0 then
-                callMainRemote(updateToolIndex, payload)
-            end
-
-            task.wait(0.05)
-        end
-    end
-
-    if proton then
-        mainNotify("Proton-24 claimed.")
-    else
-        mainNotify("Proton-24 claim requested.")
-    end
-end
-
 local TalentsBox = Tabs.Main:AddLeftGroupbox("Talents", "sparkles")
 
 TalentsBox:AddButton({
@@ -382,13 +241,6 @@ TalentsBox:AddButton({
     Func = function()
         claimQuestReward("MaroonsQuest", "Tool Reaper")
     end,
-})
-
-local ToolsBox = Tabs.Main:AddRightGroupbox("Tools", "wrench")
-
-ToolsBox:AddButton({
-    Text = "Get Proton-24",
-    Func = claimProton24,
 })
 end)
 
@@ -933,6 +785,10 @@ local MiningSensitiveChargeAlpha = 0.55
 local MiningSensitiveChargeTime = 0.55
 local MiningSensitiveChargeDelay = 0
 local MiningSensitiveAttackBurstCount = 1
+local MiningNormalActionDelay = 0.006
+local MiningNormalAttackResultDelay = 0.012
+local MiningNormalAttackBurstCount = 8
+local MiningNormalAttackBurstDelay = 0.012
 local MiningActionDelay = 0.015
 local MiningTeleportOffset = 5
 local MiningIdleDelay = 0.35
@@ -2990,7 +2846,10 @@ local function mineTarget(entry, stopWhenToggleOff, stopOnUnequip)
             chargeMisses = 0
 
             local attacksFired = 0
-            local attackBurstCount = chargeSensitiveOre and MiningSensitiveAttackBurstCount or MiningAttackBurstCount
+            local attackBurstCount = chargeSensitiveOre and MiningSensitiveAttackBurstCount or MiningNormalAttackBurstCount
+            local attackBurstDelay = chargeSensitiveOre and MiningAttackBurstDelay or MiningNormalAttackBurstDelay
+            local attackResultDelay = chargeSensitiveOre and MiningAttackResultDelay or MiningNormalAttackResultDelay
+            local actionDelay = chargeSensitiveOre and MiningActionDelay or MiningNormalActionDelay
             local attackAlpha = chargeSensitiveOre and MiningSensitiveChargeAlpha or MiningChargeAlpha
             local attackResponseTime = chargeSensitiveOre and MiningSensitiveChargeTime or MiningChargeTime
 
@@ -3019,17 +2878,17 @@ local function mineTarget(entry, stopWhenToggleOff, stopOnUnequip)
                     attacksFired = attacksFired + 1
                 end
 
-                if MiningAttackBurstDelay > 0 then
-                    task.wait(MiningAttackBurstDelay)
+                if attackBurstDelay > 0 then
+                    task.wait(attackBurstDelay)
                 elseif burstIndex % MiningAttackBurstYieldEvery == 0 then
                     task.wait()
                 end
             end
 
-            task.wait(MiningAttackResultDelay)
+            task.wait(attackResultDelay)
 
             hits = hits + attacksFired
-            task.wait(MiningActionDelay)
+            task.wait(actionDelay)
         end
     end
 
