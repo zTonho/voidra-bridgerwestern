@@ -749,6 +749,8 @@ local MiningBagDropDelay = 0.09
 local MiningBagStoreHeight = 3
 local MiningBagCollectionPasses = 12
 local MiningBagCollectionPassDelay = 0.1
+local MiningBagEmptyPassLimit = 5
+local MiningBagPostFlushScanDelay = 0.16
 local MiningBagDropExtraCalls = 6
 local MiningBagFinalDropCalls = 4
 local MiningBagReturnDelay = 0.08
@@ -774,9 +776,6 @@ local MiningDropMaxColumns = 7
 local MiningPlotInset = 5
 local MiningBringRadius = 18
 local MiningSellDropSpacing = 4
-local MiningSellLoadTimeout = 3
-local MiningSellLoadPollDelay = 0.1
-local MiningSellSettleDelay = 0.75
 local MiningMaxChargeMisses = 20
 local LastMiningWarning = 0
 local LastMiningOreSpotLoad = {}
@@ -868,12 +867,15 @@ local OreLoadSpots = {
     Cobalt = { Vector3.new(332.95, -96.18, 3327.90) },
     Amber = { Vector3.new(332.95, -96.18, 3327.90) },
     Blastshard = { Vector3.new(-6563.19, -535.76, 1122.95) },
+    Deepslate = { Vector3.new(-7836.77, 7.10, -3635.81) },
     Magma = { Vector3.new(-7066.40, -534.32, -2874.44) },
     Obsidian = { Vector3.new(-7066.40, -534.32, -2874.44) },
+    Quartz = { Vector3.new(-5546.61, -90.25, -1807.21) },
     Salt = {
         Vector3.new(-5952.75, -174.50, -2017.67),
         Vector3.new(-6563.19, -535.76, 1122.95),
     },
+    Sulfur = { Vector3.new(-29.43, 156.68, 3755.94) },
     Volcanium = { Vector3.new(-7066.40, -534.32, -2874.44) },
     Voltshard = { Vector3.new(-6563.19, -535.76, 1122.95) },
 }
@@ -2194,11 +2196,11 @@ local function moveDroppedOresToBase(origin, flushPartialAtEnd)
 
     local function flushItemBag(forcePartial)
         if MiningState.BagStoredCount <= 0 then
-            return
+            return false
         end
 
         if MiningState.BagStoredCount < MiningBagCapacity and not forcePartial then
-            return
+            return false
         end
 
         local nextSlot = moved + 1
@@ -2212,7 +2214,12 @@ local function moveDroppedOresToBase(origin, flushPartialAtEnd)
             setCharacterExactAt(origin + Vector3.new(0, MiningBagStoreHeight, 0))
             task.wait(MiningBagReturnDelay)
         end
+
+        task.wait(MiningBagPostFlushScanDelay)
+        return true
     end
+
+    local emptyPasses = 0
 
     for pass = 1, MiningBagCollectionPasses do
         local parts = pass == 1 and waitForDroppedOrePartsNearCharacter(origin) or getDroppedOrePartsNearCharacter(origin)
@@ -2229,12 +2236,19 @@ local function moveDroppedOresToBase(origin, flushPartialAtEnd)
 
                     if MiningState.BagStoredCount >= MiningBagCapacity then
                         flushItemBag()
+                        emptyPasses = 0
                     end
                 end
             end
         end
 
-        if storedThisPass == 0 and pass > 2 then
+        if storedThisPass == 0 then
+            emptyPasses = emptyPasses + 1
+        else
+            emptyPasses = 0
+        end
+
+        if emptyPasses >= MiningBagEmptyPassLimit then
             break
         end
 
@@ -2295,56 +2309,6 @@ local function talkToSellary()
     return sold
 end
 
-local function loadOwnedOresForSale()
-    local standPosition = getPlotStandPosition()
-
-    if standPosition then
-        setCharacterExactAt(standPosition)
-        task.wait(MiningSellLoadPollDelay)
-    end
-
-    local startedAt = os.clock()
-    local parts = getOwnedDroppedOreParts()
-
-    while #parts == 0 and os.clock() - startedAt < MiningSellLoadTimeout do
-        task.wait(MiningSellLoadPollDelay)
-        parts = getOwnedDroppedOreParts()
-    end
-
-    return parts
-end
-
-local function settleSellZoneOres(parts)
-    local sellPosition = getSellZoneDropPosition(1)
-
-    if sellPosition then
-        setCharacterAt(sellPosition)
-        task.wait(MiningSellLoadPollDelay)
-    end
-
-    for index, part in ipairs(parts) do
-        if part and part.Parent then
-            local destination = getSellZoneDropPosition(index, part)
-
-            if destination then
-                setGrabPartAt(part, destination)
-                callGrabHandler(part, "Grab", destination)
-                callGrabHandler(part, "Ungrab")
-            end
-        end
-
-        if index % 8 == 0 then
-            task.wait(MiningStorageBatchDelay)
-        end
-    end
-
-    if sellPosition then
-        setCharacterAt(sellPosition)
-    end
-
-    task.wait(MiningSellSettleDelay)
-end
-
 local function sellBaseOres()
     if not GrabHandlerRemote then
         miningWarn("GrabHandler remote was not found.")
@@ -2356,7 +2320,7 @@ local function sellBaseOres()
         return 0
     end
 
-    local parts = loadOwnedOresForSale()
+    local parts = getOwnedDroppedOreParts()
 
     if #parts == 0 then
         miningNotify("No owned ores found.")
@@ -2364,14 +2328,12 @@ local function sellBaseOres()
     end
 
     local moved = 0
-    local movedParts = {}
 
     for _, part in ipairs(parts) do
         local destination = getSellZoneDropPosition(moved + 1, part)
 
         if destination and moveGrabPartToBaseRouted(part, destination) then
             moved = moved + 1
-            movedParts[moved] = part
 
             if moved % 10 == 0 then
                 task.wait(MiningStorageBatchDelay)
@@ -2384,7 +2346,7 @@ local function sellBaseOres()
         return 0
     end
 
-    settleSellZoneOres(movedParts)
+    task.wait(0.5)
 
     if talkToSellary() then
         miningNotify("Ore sold successfully.")
