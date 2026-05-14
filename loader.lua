@@ -132,9 +132,9 @@ local Window = Library:CreateWindow({
 local Tabs = {
     Main = Window:AddTab("Main", "house"),
     Mining = Window:AddTab("Ores", "pickaxe"),
-    Player = Window:AddTab("Player", "user"),
     Teleports = Window:AddTab("Teleports", "map-pin"),
     Autobuy = Window:AddTab("Autobuy", "shopping-cart"),
+    Player = Window:AddTab("Player", "user"),
     Settings = Window:AddTab("UI Settings", "settings"),
 }
 
@@ -189,6 +189,69 @@ MenuBox:AddButton({
         end
     end,
 })
+
+local MainOk, MainError = pcall(function()
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local function mainNotify(description)
+    Library:Notify({
+        Title = "voidra",
+        Description = description,
+        Time = 3,
+    })
+end
+
+local function getQuestRewardRemote()
+    local events = ReplicatedStorage:FindFirstChild("Events")
+    local quests = events and events:FindFirstChild("Quests")
+    local v2 = quests and quests:FindFirstChild("V2")
+
+    return v2 and v2:FindFirstChild("ClaimQuestReward") or nil
+end
+
+local function claimQuestReward(questName, rewardName)
+    local remote = getQuestRewardRemote()
+
+    if not remote then
+        mainNotify("ClaimQuestReward remote was not found.")
+        return
+    end
+
+    local ok, result = pcall(function()
+        if remote:IsA("RemoteFunction") then
+            return remote:InvokeServer(questName)
+        end
+
+        remote:FireServer(questName)
+        return true
+    end)
+
+    if ok then
+        mainNotify(("%s claim requested."):format(rewardName))
+    else
+        warn("[voidra] Quest reward claim failed: " .. tostring(result))
+        mainNotify("Quest reward claim failed. Check console.")
+    end
+end
+
+local TalentsBox = Tabs.Main:AddLeftGroupbox("Talents", "sparkles")
+
+TalentsBox:AddButton({
+    Text = "Claim Tool Reaper",
+    Func = function()
+        claimQuestReward("MaroonsQuest", "Tool Reaper")
+    end,
+})
+end)
+
+if not MainOk then
+    warn("[voidra] Main setup failed: " .. tostring(MainError))
+    Library:Notify({
+        Title = "voidra",
+        Description = "Main setup failed. Check console.",
+        Time = 5,
+    })
+end
 
 local MovementOk, MovementError = pcall(function()
 local Players = game:GetService("Players")
