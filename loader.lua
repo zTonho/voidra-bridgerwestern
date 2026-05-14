@@ -143,6 +143,7 @@ local State = {
     Fishing = {
         AutoFish = false,
         AutoSell = false,
+        AutoStore = false,
         UseHotspots = true,
         StopRequested = false,
     },
@@ -206,25 +207,25 @@ local FishingSpotPosition = Vector3.new(1768.35, 3.03, -1398.29)
 local FishingCastCFrame = CFrame.new(1743.9234619140625, -5.975002288818359, -1410.97705078125, -0, 1, -0, -0, 0, -1, -1, 0, -0)
 local FishingCastRotation = CFrame.new(0, 0, 0, -0, 1, -0, -0, 0, -1, -1, 0, -0)
 local FishingAttackAlpha = 1
-local FishingAttackResponseTime = 0.45
-local FishingCastAttackDelay = 0.025
-local FishingLineLandDelay = 0.65
-local FishingReelWaitTimeout = 10
-local FishingReelPollDelay = 0.02
-local FishingReelHitDelay = 0.002
-local FishingReelHitRepeats = 52
-local FishingReelEndRepeats = 3
-local FishingCycleDelay = 0.08
-local FishingIdleDelay = 0.45
+local FishingAttackResponseTime = 0.35
+local FishingCastAttackDelay = 0.02
+local FishingLineLandDelay = 0.48
+local FishingReelWaitTimeout = 6
+local FishingReelPollDelay = 0.04
+local FishingReelHitRepeats = 36
+local FishingReelHitBatchSize = 6
+local FishingReelEndRepeats = 2
+local FishingPostReelDelay = 0.18
+local FishingCycleDelay = 0.05
+local FishingIdleDelay = 0.35
 local FishingHotspotHoverHeight = 9
 local FishingBaseTeleportOffset = 5
 local FishingBaseDropSpacing = 4
 local FishingBaseDropHeight = 1.25
 local FishingOwnedGrabScanRadius = 90
-local FishingCatchSpawnTimeout = 1.4
-local FishingCatchPollDelay = 0.025
 local FishingHeldDropDelay = 0.12
 local FishingSellAfterCatchDelay = 0.02
+local FishingAutoStoreDelay = 0.45
 local FishingSellDropSpacing = 4
 local FishingSellDropHeight = 1.25
 local FishingSellMoveRepeats = 5
@@ -637,36 +638,11 @@ local function isFishingCatchingActive()
     return character and character:GetAttribute("Catching") == true
 end
 
-local function hasFishingReelGui()
-    local playerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
-
-    if not playerGui then
-        return false
-    end
-
-    for _, object in ipairs(playerGui:GetDescendants()) do
-        if object:IsA("GuiObject") and object.Visible then
-            local name = object.Name:lower()
-
-            if name:find("fish", 1, true)
-                or name:find("reel", 1, true)
-                or name:find("session", 1, true)
-                or name:find("catch", 1, true)
-                or name:find("minigame", 1, true)
-            then
-                return true
-            end
-        end
-    end
-
-    return false
-end
-
 local function waitForFishingReel(singleRun)
     local startedAt = os.clock()
 
     while canContinueFishing(singleRun) and os.clock() - startedAt < FishingReelWaitTimeout do
-        if isFishingCatchingActive() or hasFishingReelGui() then
+        if isFishingCatchingActive() then
             return true
         end
 
@@ -676,14 +652,6 @@ local function waitForFishingReel(singleRun)
     return false
 end
 
-local function countFishingCatches()
-    if type(getCatchParts) ~= "function" then
-        return 0
-    end
-
-    return #getCatchParts()
-end
-
 local function recallFishingLine()
     local chargeRemote = getEventsChild("Tools", "Charge")
 
@@ -691,20 +659,6 @@ local function recallFishingLine()
         mainCallRemote(chargeRemote, {})
         task.wait(0.12)
     end
-end
-
-local function waitForFishingCatch(previousCount, singleRun)
-    local startedAt = os.clock()
-
-    while canContinueFishing(singleRun) and os.clock() - startedAt < FishingCatchSpawnTimeout do
-        if countFishingCatches() > previousCount then
-            return true
-        end
-
-        task.wait(FishingCatchPollDelay)
-    end
-
-    return countFishingCatches() > previousCount
 end
 
 local function runFishingCycle(singleRun)
@@ -736,8 +690,6 @@ local function runFishingCycle(singleRun)
         return false
     end
 
-    local catchCountBefore = countFishingCatches()
-
     mainCallRemote(chargeRemote, {
         HitPosition = castCFrame,
     })
@@ -758,15 +710,15 @@ local function runFishingCycle(singleRun)
         return false
     end
 
-    for _ = 1, FishingReelHitRepeats do
+    for index = 1, FishingReelHitRepeats do
         if not canContinueFishing(singleRun) then
             return false
         end
 
         mainCallRemote(reelHitRemote)
 
-        if FishingReelHitDelay > 0 then
-            task.wait(FishingReelHitDelay)
+        if index % FishingReelHitBatchSize == 0 then
+            task.wait()
         end
     end
 
@@ -778,7 +730,8 @@ local function runFishingCycle(singleRun)
         mainCallRemote(reelEndRemote)
     end
 
-    return waitForFishingCatch(catchCountBefore, singleRun)
+    task.wait(FishingPostReelDelay)
+    return true
 end
 
 local function getNauticSellary()
@@ -999,14 +952,14 @@ function getCatchParts()
         addCatch(catch)
     end
 
-    for _, container in ipairs({ getMainCharacter(), workspace:FindFirstChild("Grab") }) do
-        if container then
-            for _, object in ipairs(container:GetDescendants()) do
-                local root = getCatchMarkerRoot(object)
+    local character = getMainCharacter()
 
-                if root then
-                    addCatch(root)
-                end
+    if character then
+        for _, object in ipairs(character:GetDescendants()) do
+            local root = getCatchMarkerRoot(object)
+
+            if root then
+                addCatch(root)
             end
         end
     end
@@ -1229,12 +1182,25 @@ FishingBox:AddButton({
     end,
 })
 
+FishingBox:AddButton({
+    Text = "Store loot",
+    Func = function()
+        task.spawn(storeFishCatchesAtBase)
+    end,
+})
+
 FishingBox:AddToggle("FishingAutoSell", {
     Text = "Auto sell fish",
     Default = false,
 })
 
+FishingBox:AddToggle("FishingAutoStore", {
+    Text = "Auto store loot",
+    Default = false,
+})
+
 local fishingLoopRunning = false
+local fishingStoreLoopRunning = false
 
 Toggles.FishingUseHotspots:OnChanged(function(enabled)
     FishingState.UseHotspots = enabled
@@ -1242,6 +1208,25 @@ end)
 
 Toggles.FishingAutoSell:OnChanged(function(enabled)
     FishingState.AutoSell = enabled
+end)
+
+Toggles.FishingAutoStore:OnChanged(function(enabled)
+    FishingState.AutoStore = enabled
+
+    if not enabled or fishingStoreLoopRunning then
+        return
+    end
+
+    fishingStoreLoopRunning = true
+
+    task.spawn(function()
+        while Toggles.FishingAutoStore and Toggles.FishingAutoStore.Value do
+            storeFishCatchesAtBase()
+            task.wait(FishingAutoStoreDelay)
+        end
+
+        fishingStoreLoopRunning = false
+    end)
 end)
 
 Toggles.FishingAutoFish:OnChanged(function(enabled)
@@ -4086,7 +4071,7 @@ end
 if SaveManager then
     SaveManager:SetLibrary(Library)
     SaveManager:IgnoreThemeSettings()
-    SaveManager:SetIgnoreIndexes({ "MenuKeybind", "MiningAutoFarm", "FishingAutoFish", "FishingAutoSell" })
+    SaveManager:SetIgnoreIndexes({ "MenuKeybind", "MiningAutoFarm", "FishingAutoFish", "FishingAutoSell", "FishingAutoStore" })
     SaveManager:SetFolder("voidra")
     SaveManager:SetSubFolder(tostring(game.PlaceId))
     SaveManager:BuildConfigSection(Tabs.Settings)
