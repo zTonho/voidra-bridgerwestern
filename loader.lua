@@ -2932,7 +2932,7 @@ end
 
 local MiningBox = Tabs.Mining:AddLeftGroupbox("Autofarm", "pickaxe")
 
-MiningBox:AddLabel("High ping can affect autofarm timing.")
+MiningBox:AddLabel("⚠ High ping may affect farm.")
 
 MiningBox:AddDropdown("MiningOreFilter", {
     Text = "Ore",
