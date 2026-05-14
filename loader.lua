@@ -220,6 +220,7 @@ local FishingHotspotHoverHeight = 9
 local FishingBaseTeleportOffset = 5
 local FishingBaseDropSpacing = 4
 local FishingBaseDropHeight = 1.25
+local FishingOwnedGrabScanRadius = 90
 local FishingCatchSpawnTimeout = 1.4
 local FishingCatchPollDelay = 0.025
 local FishingHeldDropDelay = 0.12
@@ -873,6 +874,38 @@ local function getCatchMarkerRoot(marker)
     return nil
 end
 
+local function getOwnedGrabRootOwner(root)
+    if not root then
+        return nil
+    end
+
+    return root:FindFirstChild("Owner")
+        or root:FindFirstChild("owner")
+        or root:FindFirstChild("Owner", true)
+        or root:FindFirstChild("owner", true)
+end
+
+local function isOwnedGrabLootRoot(root)
+    local grab = workspace:FindFirstChild("Grab")
+
+    if not root or not grab or root.Parent ~= grab then
+        return false
+    end
+
+    if not ownerMatchesMainPlayer(getOwnedGrabRootOwner(root)) then
+        return false
+    end
+
+    local characterRoot = getMainRoot()
+    local lootPosition = getMainPosition(root)
+
+    if characterRoot and lootPosition then
+        return (lootPosition - characterRoot.Position).Magnitude <= FishingOwnedGrabScanRadius
+    end
+
+    return true
+end
+
 local function getCatchMoveRoot(instance)
     local current = instance
     local best = instance
@@ -974,6 +1007,16 @@ function getCatchParts()
                 if root then
                     addCatch(root)
                 end
+            end
+        end
+    end
+
+    local grab = workspace:FindFirstChild("Grab")
+
+    if grab then
+        for _, object in ipairs(grab:GetChildren()) do
+            if isOwnedGrabLootRoot(object) then
+                addCatch(object)
             end
         end
     end
