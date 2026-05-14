@@ -142,6 +142,8 @@ local State = {
     Loaded = true,
     Fishing = {
         AutoFish = false,
+        AutoReturn = true,
+        AutoReel = true,
         StopRequested = false,
     },
     Mining = {
@@ -359,7 +361,11 @@ local function equipFishingRod()
     return getFishingRod() or rod
 end
 
-local function canContinueFishing()
+local function canContinueFishing(singleRun)
+    if singleRun then
+        return not FishingState.StopRequested
+    end
+
     return Toggles.FishingAutoFish
         and Toggles.FishingAutoFish.Value
         and not FishingState.StopRequested
@@ -390,10 +396,10 @@ local function hasFishingReelGui()
     return false
 end
 
-local function waitForFishingReel()
+local function waitForFishingReel(singleRun)
     local startedAt = os.clock()
 
-    while canContinueFishing() and os.clock() - startedAt < FishingReelWaitTimeout do
+    while canContinueFishing(singleRun) and os.clock() - startedAt < FishingReelWaitTimeout do
         if hasFishingReelGui() then
             return true
         end
@@ -404,7 +410,17 @@ local function waitForFishingReel()
     return false
 end
 
-local function runFishingCycle()
+local function teleportToFishingSpot()
+    if setMainCharacterAt(FishingSpotPosition) then
+        mainNotify("Teleported to fishing spot.")
+        return true
+    end
+
+    mainNotify("Character root was not found.")
+    return false
+end
+
+local function runFishingCycle(singleRun)
     local chargeRemote = getEventsChild("Tools", "Charge")
     local attackRemote = getEventsChild("Tools", "Attack")
     local reelHitRemote = getEventsChild("Fish", "ReelSessionHit")
@@ -415,9 +431,11 @@ local function runFishingCycle()
         return false
     end
 
-    if not setMainCharacterAt(FishingSpotPosition) then
-        mainNotify("Character root was not found.")
-        return false
+    if FishingState.AutoReturn then
+        if not setMainCharacterAt(FishingSpotPosition) then
+            mainNotify("Character root was not found.")
+            return false
+        end
     end
 
     if not equipFishingRod() then
@@ -440,12 +458,16 @@ local function runFishingCycle()
 
     task.wait(FishingLineLandDelay)
 
-    if not waitForFishingReel() then
+    if not FishingState.AutoReel then
+        return true
+    end
+
+    if not waitForFishingReel(singleRun) then
         return false
     end
 
     for _ = 1, FishingReelHitRepeats do
-        if not canContinueFishing() then
+        if not canContinueFishing(singleRun) then
             return false
         end
 
@@ -457,7 +479,7 @@ local function runFishingCycle()
     end
 
     for _ = 1, FishingReelEndRepeats do
-        if not canContinueFishing() then
+        if not canContinueFishing(singleRun) then
             return false
         end
 
@@ -478,12 +500,59 @@ TalentsBox:AddButton({
 
 local FishingBox = Tabs.Main:AddRightGroupbox("Fishing", "fish")
 
+FishingBox:AddButton({
+    Text = "Go to fishing spot",
+    Func = teleportToFishingSpot,
+})
+
+FishingBox:AddButton({
+    Text = "Equip fishing rod",
+    Func = function()
+        if equipFishingRod() then
+            mainNotify("Fishing rod equipped.")
+        else
+            mainNotify("Fishing rod was not found.")
+        end
+    end,
+})
+
+FishingBox:AddButton({
+    Text = "Fish once",
+    Func = function()
+        task.spawn(function()
+            FishingState.StopRequested = false
+            runFishingCycle(true)
+        end)
+    end,
+})
+
+FishingBox:AddToggle("FishingAutoReturn", {
+    Text = "Stay at fishing spot",
+    Default = true,
+})
+
+FishingBox:AddToggle("FishingAutoReel", {
+    Text = "Auto reel",
+    Default = true,
+})
+
 FishingBox:AddToggle("FishingAutoFish", {
     Text = "Auto fish",
     Default = false,
 })
 
+FishingBox:AddDivider("Storage")
+FishingBox:AddLabel("Fish storage/sell needs remotes.")
+
 local fishingLoopRunning = false
+
+Toggles.FishingAutoReturn:OnChanged(function(enabled)
+    FishingState.AutoReturn = enabled
+end)
+
+Toggles.FishingAutoReel:OnChanged(function(enabled)
+    FishingState.AutoReel = enabled
+end)
 
 Toggles.FishingAutoFish:OnChanged(function(enabled)
     FishingState.AutoFish = enabled
@@ -497,7 +566,7 @@ Toggles.FishingAutoFish:OnChanged(function(enabled)
 
     task.spawn(function()
         while canContinueFishing() do
-            local ok = runFishingCycle()
+            local ok = runFishingCycle(false)
             task.wait(ok and FishingCycleDelay or FishingIdleDelay)
         end
 
