@@ -203,13 +203,13 @@ local FishingSpotPosition = Vector3.new(1768.35, 3.03, -1398.29)
 local FishingCastCFrame = CFrame.new(1743.9234619140625, -5.975002288818359, -1410.97705078125, -0, 1, -0, -0, 0, -1, -1, 0, -0)
 local FishingAttackAlpha = 1
 local FishingAttackResponseTime = 1.2988306999977794
-local FishingCastAttackDelay = 0
-local FishingReelWaitTimeout = 8
-local FishingReelFallbackDelay = 2.5
-local FishingReelHitDelay = 0
+local FishingCastAttackDelay = 0.05
+local FishingReelWaitTimeout = 20
+local FishingReelPollDelay = 0.05
+local FishingReelHitDelay = 0.01
 local FishingReelHitRepeats = 4
 local FishingReelEndRepeats = 1
-local FishingCycleDelay = 0.05
+local FishingCycleDelay = 0.1
 local FishingIdleDelay = 0.35
 
 local function mainNotify(description)
@@ -377,8 +377,9 @@ local function hasFishingReelGui()
 
             if name:find("fish", 1, true)
                 or name:find("reel", 1, true)
-                or name:find("bar", 1, true)
                 or name:find("session", 1, true)
+                or name:find("catch", 1, true)
+                or name:find("minigame", 1, true)
             then
                 return true
             end
@@ -396,11 +397,10 @@ local function waitForFishingReel()
             return true
         end
 
-        task.wait(0.1)
+        task.wait(FishingReelPollDelay)
     end
 
-    task.wait(FishingReelFallbackDelay)
-    return canContinueFishing()
+    return false
 end
 
 local function runFishingCycle()
@@ -436,6 +436,10 @@ local function runFishingCycle()
         Alpha = FishingAttackAlpha,
         ResponseTime = FishingAttackResponseTime,
     })
+
+    if not waitForFishingReel() then
+        return false
+    end
 
     for _ = 1, FishingReelHitRepeats do
         if not canContinueFishing() then
