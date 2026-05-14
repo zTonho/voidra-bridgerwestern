@@ -201,16 +201,17 @@ local LocalPlayer = Players.LocalPlayer or Players.PlayerAdded:Wait()
 local FishingState = State.Fishing
 local FishingSpotPosition = Vector3.new(1768.35, 3.03, -1398.29)
 local FishingCastCFrame = CFrame.new(1743.9234619140625, -5.975002288818359, -1410.97705078125, -0, 1, -0, -0, 0, -1, -1, 0, -0)
-local FishingAttackAlpha = 1
+local FishingAttackAlpha = 0.9614042639732361
 local FishingAttackResponseTime = 1.2988306999977794
 local FishingCastAttackDelay = 0.05
+local FishingLineLandDelay = 1.15
 local FishingReelWaitTimeout = 20
 local FishingReelPollDelay = 0.05
 local FishingReelHitDelay = 0.01
 local FishingReelHitRepeats = 4
 local FishingReelEndRepeats = 1
-local FishingCycleDelay = 0.1
-local FishingIdleDelay = 0.35
+local FishingCycleDelay = 0.45
+local FishingIdleDelay = 2
 
 local function mainNotify(description)
     Library:Notify({
@@ -436,6 +437,8 @@ local function runFishingCycle()
         Alpha = FishingAttackAlpha,
         ResponseTime = FishingAttackResponseTime,
     })
+
+    task.wait(FishingLineLandDelay)
 
     if not waitForFishingReel() then
         return false
