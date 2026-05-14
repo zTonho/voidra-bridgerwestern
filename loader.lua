@@ -2286,13 +2286,6 @@ local function talkToSellary()
         return false
     end
 
-    local talkPosition = getPosition(talkPart)
-
-    if talkPosition then
-        setCharacterAt(talkPosition)
-        task.wait(0.2)
-    end
-
     if not callSellaryInteract() then
         return false
     end
@@ -2320,10 +2313,10 @@ local function sellBaseOres()
         return 0
     end
 
-    local parts = getBaseDroppedOreParts()
+    local parts = getOwnedDroppedOreParts()
 
     if #parts == 0 then
-        miningNotify("No ores found in your base.")
+        miningNotify("No owned ores found.")
         return 0
     end
 
@@ -2332,7 +2325,7 @@ local function sellBaseOres()
     for _, part in ipairs(parts) do
         local destination = getSellZoneDropPosition(moved + 1, part)
 
-        if destination and moveGrabPartToBaseRouted(part, destination) then
+        if destination and moveGrabPartFast(part, destination, MiningAutoRouteFinalRepeats, MiningAutoRouteDelay, MiningAutoLiftHeight) then
             moved = moved + 1
 
             if moved % 10 == 0 then
