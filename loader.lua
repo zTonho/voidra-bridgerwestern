@@ -140,19 +140,6 @@ local Tabs = {
 
 local State = {
     Loaded = true,
-    Main = {
-        Godmode = false,
-        GodHealth = 1000000,
-        Connection = nil,
-        HealthConnection = nil,
-        StateConnection = nil,
-        Humanoid = nil,
-        ForceField = nil,
-        OriginalMaxHealth = nil,
-        OriginalBreakJointsOnDeath = nil,
-        OriginalRequiresNeck = nil,
-        OriginalStateEnabled = {},
-    },
     Mining = {
         SelectedOre = "Copper",
         AutoFarm = false,
@@ -714,250 +701,6 @@ if not MovementOk then
     })
 end
 
-local MainOk, MainError = pcall(function()
-local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
-local LocalPlayer = Players.LocalPlayer or Players.PlayerAdded:Wait()
-local MainState = State.Main
-local ProtectedHumanoidStates = {
-    Enum.HumanoidStateType.Dead,
-    Enum.HumanoidStateType.FallingDown,
-    Enum.HumanoidStateType.Ragdoll,
-    Enum.HumanoidStateType.Physics,
-}
-
-local function getCharacter()
-    return LocalPlayer.Character
-end
-
-local function getHumanoid()
-    local character = getCharacter()
-    return character and character:FindFirstChildOfClass("Humanoid")
-end
-
-local function disconnectHealthWatcher()
-    if MainState.HealthConnection then
-        MainState.HealthConnection:Disconnect()
-        MainState.HealthConnection = nil
-    end
-
-    if MainState.StateConnection then
-        MainState.StateConnection:Disconnect()
-        MainState.StateConnection = nil
-    end
-end
-
-local function rememberHumanoid(humanoid)
-    if MainState.Humanoid == humanoid then
-        return
-    end
-
-    disconnectHealthWatcher()
-    MainState.Humanoid = humanoid
-    MainState.OriginalMaxHealth = humanoid.MaxHealth
-
-    local ok, breakJoints = pcall(function()
-        return humanoid.BreakJointsOnDeath
-    end)
-
-    MainState.OriginalBreakJointsOnDeath = ok and breakJoints or nil
-
-    local requiresNeckOk, requiresNeck = pcall(function()
-        return humanoid.RequiresNeck
-    end)
-
-    MainState.OriginalRequiresNeck = requiresNeckOk and requiresNeck or nil
-    MainState.OriginalStateEnabled = {}
-
-    for _, state in ipairs(ProtectedHumanoidStates) do
-        local stateOk, enabled = pcall(function()
-            return humanoid:GetStateEnabled(state)
-        end)
-
-        if stateOk then
-            MainState.OriginalStateEnabled[state] = enabled
-        end
-    end
-end
-
-local function ensureGodForceField(character)
-    if not character then
-        return
-    end
-
-    local forceField = MainState.ForceField
-
-    if not forceField or forceField.Parent ~= character then
-        if forceField then
-            forceField:Destroy()
-        end
-
-        forceField = Instance.new("ForceField")
-        forceField.Name = "VoidraGodmodeForceField"
-        forceField.Visible = false
-        forceField.Parent = character
-        MainState.ForceField = forceField
-    end
-end
-
-local function protectHumanoidState(humanoid)
-    pcall(function()
-        humanoid.BreakJointsOnDeath = false
-    end)
-
-    pcall(function()
-        humanoid.RequiresNeck = false
-    end)
-
-    for _, state in ipairs(ProtectedHumanoidStates) do
-        pcall(function()
-            humanoid:SetStateEnabled(state, false)
-        end)
-    end
-
-    local currentState = humanoid:GetState()
-    if currentState == Enum.HumanoidStateType.Dead
-        or currentState == Enum.HumanoidStateType.Ragdoll
-        or currentState == Enum.HumanoidStateType.FallingDown
-        or currentState == Enum.HumanoidStateType.Physics
-    then
-        pcall(function()
-            humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
-        end)
-    end
-end
-
-local function fillHumanoidHealth()
-    local character = getCharacter()
-    local humanoid = getHumanoid()
-
-    if not MainState.Godmode or not humanoid then
-        return
-    end
-
-    rememberHumanoid(humanoid)
-    ensureGodForceField(character)
-    protectHumanoidState(humanoid)
-
-    if humanoid.MaxHealth < MainState.GodHealth then
-        humanoid.MaxHealth = MainState.GodHealth
-    end
-
-    if humanoid.Health < humanoid.MaxHealth then
-        humanoid.Health = humanoid.MaxHealth
-    end
-
-    if not MainState.HealthConnection then
-        MainState.HealthConnection = humanoid.HealthChanged:Connect(function()
-            if MainState.Godmode and humanoid.Parent and humanoid.Health < humanoid.MaxHealth then
-                protectHumanoidState(humanoid)
-                humanoid.Health = humanoid.MaxHealth
-            end
-        end)
-    end
-
-    if not MainState.StateConnection then
-        MainState.StateConnection = humanoid.StateChanged:Connect(function(_, newState)
-            if not MainState.Godmode or not humanoid.Parent then
-                return
-            end
-
-            if newState == Enum.HumanoidStateType.Dead
-                or newState == Enum.HumanoidStateType.Ragdoll
-                or newState == Enum.HumanoidStateType.FallingDown
-                or newState == Enum.HumanoidStateType.Physics
-            then
-                protectHumanoidState(humanoid)
-                humanoid.Health = humanoid.MaxHealth
-            end
-        end)
-    end
-end
-
-local function restoreHumanoid()
-    local humanoid = MainState.Humanoid
-
-    disconnectHealthWatcher()
-
-    if MainState.ForceField then
-        MainState.ForceField:Destroy()
-        MainState.ForceField = nil
-    end
-
-    if humanoid and humanoid.Parent then
-        if MainState.OriginalMaxHealth then
-            humanoid.MaxHealth = MainState.OriginalMaxHealth
-            humanoid.Health = math.min(humanoid.Health, humanoid.MaxHealth)
-        end
-
-        if MainState.OriginalBreakJointsOnDeath ~= nil then
-            pcall(function()
-                humanoid.BreakJointsOnDeath = MainState.OriginalBreakJointsOnDeath
-            end)
-        end
-
-        if MainState.OriginalRequiresNeck ~= nil then
-            pcall(function()
-                humanoid.RequiresNeck = MainState.OriginalRequiresNeck
-            end)
-        end
-
-        for state, enabled in pairs(MainState.OriginalStateEnabled) do
-            pcall(function()
-                humanoid:SetStateEnabled(state, enabled)
-            end)
-        end
-    end
-
-    MainState.Humanoid = nil
-    MainState.OriginalMaxHealth = nil
-    MainState.OriginalBreakJointsOnDeath = nil
-    MainState.OriginalRequiresNeck = nil
-    MainState.OriginalStateEnabled = {}
-end
-
-local function setHumanoidGodmode(enabled)
-    MainState.Godmode = enabled
-
-    if MainState.Connection then
-        MainState.Connection:Disconnect()
-        MainState.Connection = nil
-    end
-
-    if not enabled then
-        restoreHumanoid()
-        return
-    end
-
-    fillHumanoidHealth()
-    MainState.Connection = RunService.Heartbeat:Connect(fillHumanoidHealth)
-end
-
-local CharacterBox = Tabs.Main:AddLeftGroupbox("Character", "shield")
-
-CharacterBox:AddToggle("MainHumanoidGodmode", {
-    Text = "Godmode",
-    Default = false,
-})
-
-Toggles.MainHumanoidGodmode:OnChanged(setHumanoidGodmode)
-
-local previousCleanup = cleanup
-cleanup = function()
-    previousCleanup()
-    setHumanoidGodmode(false)
-end
-end)
-
-if not MainOk then
-    warn("[voidra] Main setup failed: " .. tostring(MainError))
-    Library:Notify({
-        Title = "voidra",
-        Description = "Main setup failed. Check console.",
-        Time = 5,
-    })
-end
-
 local MiningOk, MiningError = pcall(function()
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -1097,6 +840,7 @@ for _, oreName in ipairs(OreNames) do
 end
 
 local OreLoadSpots = {
+    Abyssalite = { Vector3.new(-7066.40, -534.32, -2874.44) },
     Marble = { Vector3.new(-595.55, 78.75, -240.07) },
     Granite = { Vector3.new(-595.55, 78.75, -240.07) },
     Lithium = { Vector3.new(-595.55, 78.75, -240.07) },
@@ -1109,7 +853,15 @@ local OreLoadSpots = {
     Copper = { Vector3.new(-1182.11, -6.12, 1293.27) },
     Cobalt = { Vector3.new(332.95, -96.18, 3327.90) },
     Amber = { Vector3.new(332.95, -96.18, 3327.90) },
-    Salt = { Vector3.new(-5952.75, -174.50, -2017.67) },
+    Blastshard = { Vector3.new(-6563.19, -535.76, 1122.95) },
+    Magma = { Vector3.new(-7066.40, -534.32, -2874.44) },
+    Obsidian = { Vector3.new(-7066.40, -534.32, -2874.44) },
+    Salt = {
+        Vector3.new(-5952.75, -174.50, -2017.67),
+        Vector3.new(-6563.19, -535.76, 1122.95),
+    },
+    Volcanium = { Vector3.new(-7066.40, -534.32, -2874.44) },
+    Voltshard = { Vector3.new(-6563.19, -535.76, 1122.95) },
 }
 
 local EventsFolder = ReplicatedStorage:WaitForChild("Events", 10)
