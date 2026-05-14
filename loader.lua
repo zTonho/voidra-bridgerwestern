@@ -140,6 +140,10 @@ local Tabs = {
 
 local State = {
     Loaded = true,
+    Fishing = {
+        AutoFish = false,
+        StopRequested = false,
+    },
     Mining = {
         SelectedOre = "Copper",
         AutoFarm = false,
@@ -191,7 +195,22 @@ MenuBox:AddButton({
 })
 
 local MainOk, MainError = pcall(function()
+local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local LocalPlayer = Players.LocalPlayer or Players.PlayerAdded:Wait()
+local FishingState = State.Fishing
+local FishingSpotPosition = Vector3.new(1768.35, 3.03, -1398.29)
+local FishingCastCFrame = CFrame.new(1743.9234619140625, -5.975002288818359, -1410.97705078125, -0, 1, -0, -0, 0, -1, -1, 0, -0)
+local FishingAttackAlpha = 1
+local FishingAttackResponseTime = 1.2988306999977794
+local FishingCastAttackDelay = 0
+local FishingReelWaitTimeout = 8
+local FishingReelFallbackDelay = 2.5
+local FishingReelHitDelay = 0
+local FishingReelHitRepeats = 4
+local FishingReelEndRepeats = 1
+local FishingCycleDelay = 0.05
+local FishingIdleDelay = 0.35
 
 local function mainNotify(description)
     Library:Notify({
@@ -234,6 +253,213 @@ local function claimQuestReward(questName, rewardName)
     end
 end
 
+local function mainCallRemote(remote, ...)
+    if not remote then
+        return false
+    end
+
+    local args = { ... }
+    local ok = pcall(function()
+        if remote:IsA("RemoteFunction") then
+            remote:InvokeServer(unpack(args))
+        else
+            remote:FireServer(unpack(args))
+        end
+    end)
+
+    return ok
+end
+
+local function getMainCharacter()
+    return LocalPlayer.Character
+end
+
+local function getMainHumanoid()
+    local character = getMainCharacter()
+    return character and character:FindFirstChildOfClass("Humanoid")
+end
+
+local function getMainRoot()
+    local character = getMainCharacter()
+    return character
+        and (
+            character:FindFirstChild("HumanoidRootPart")
+            or character.PrimaryPart
+            or character:FindFirstChildWhichIsA("BasePart")
+        )
+end
+
+local function setMainCharacterAt(position)
+    local root = getMainRoot()
+
+    if not root then
+        return false
+    end
+
+    root.CFrame = CFrame.new(position)
+    root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+    root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+    return true
+end
+
+local function getEventsChild(...)
+    local current = ReplicatedStorage:FindFirstChild("Events")
+
+    for _, name in ipairs({ ... }) do
+        current = current and current:FindFirstChild(name)
+    end
+
+    return current
+end
+
+local function isFishingRod(tool)
+    if not tool or not tool:IsA("Tool") then
+        return false
+    end
+
+    local name = tool.Name:lower()
+    return name:find("fishing", 1, true) ~= nil or name:find("rod", 1, true) ~= nil
+end
+
+local function getFishingRod()
+    local character = getMainCharacter()
+    local backpack = LocalPlayer:FindFirstChildOfClass("Backpack")
+
+    for _, container in ipairs({ character, backpack, LocalPlayer }) do
+        if container then
+            for _, object in ipairs(container:GetChildren()) do
+                if isFishingRod(object) then
+                    return object
+                end
+            end
+        end
+    end
+
+    return nil
+end
+
+local function equipFishingRod()
+    local humanoid = getMainHumanoid()
+    local character = getMainCharacter()
+    local rod = getFishingRod()
+
+    if not rod then
+        return nil
+    end
+
+    if humanoid and character and rod.Parent ~= character then
+        pcall(function()
+            humanoid:EquipTool(rod)
+        end)
+
+        task.wait(0.15)
+    end
+
+    return getFishingRod() or rod
+end
+
+local function canContinueFishing()
+    return Toggles.FishingAutoFish
+        and Toggles.FishingAutoFish.Value
+        and not FishingState.StopRequested
+end
+
+local function hasFishingReelGui()
+    local playerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+
+    if not playerGui then
+        return false
+    end
+
+    for _, object in ipairs(playerGui:GetDescendants()) do
+        if object:IsA("GuiObject") and object.Visible then
+            local name = object.Name:lower()
+
+            if name:find("fish", 1, true)
+                or name:find("reel", 1, true)
+                or name:find("bar", 1, true)
+                or name:find("session", 1, true)
+            then
+                return true
+            end
+        end
+    end
+
+    return false
+end
+
+local function waitForFishingReel()
+    local startedAt = os.clock()
+
+    while canContinueFishing() and os.clock() - startedAt < FishingReelWaitTimeout do
+        if hasFishingReelGui() then
+            return true
+        end
+
+        task.wait(0.1)
+    end
+
+    task.wait(FishingReelFallbackDelay)
+    return canContinueFishing()
+end
+
+local function runFishingCycle()
+    local chargeRemote = getEventsChild("Tools", "Charge")
+    local attackRemote = getEventsChild("Tools", "Attack")
+    local reelHitRemote = getEventsChild("Fish", "ReelSessionHit")
+    local reelEndRemote = getEventsChild("Fish", "ReelSessionEnd")
+
+    if not chargeRemote or not attackRemote or not reelHitRemote or not reelEndRemote then
+        mainNotify("Fishing remotes were not found.")
+        return false
+    end
+
+    if not setMainCharacterAt(FishingSpotPosition) then
+        mainNotify("Character root was not found.")
+        return false
+    end
+
+    if not equipFishingRod() then
+        mainNotify("Fishing rod was not found.")
+        return false
+    end
+
+    mainCallRemote(chargeRemote, {
+        HitPosition = FishingCastCFrame,
+    })
+
+    if FishingCastAttackDelay > 0 then
+        task.wait(FishingCastAttackDelay)
+    end
+
+    mainCallRemote(attackRemote, {
+        Alpha = FishingAttackAlpha,
+        ResponseTime = FishingAttackResponseTime,
+    })
+
+    for _ = 1, FishingReelHitRepeats do
+        if not canContinueFishing() then
+            return false
+        end
+
+        mainCallRemote(reelHitRemote)
+
+        if FishingReelHitDelay > 0 then
+            task.wait(FishingReelHitDelay)
+        end
+    end
+
+    for _ = 1, FishingReelEndRepeats do
+        if not canContinueFishing() then
+            return false
+        end
+
+        mainCallRemote(reelEndRemote)
+    end
+
+    return true
+end
+
 local TalentsBox = Tabs.Main:AddLeftGroupbox("Talents", "sparkles")
 
 TalentsBox:AddButton({
@@ -242,6 +468,41 @@ TalentsBox:AddButton({
         claimQuestReward("MaroonsQuest", "Tool Reaper")
     end,
 })
+
+local FishingBox = Tabs.Main:AddRightGroupbox("Fishing", "fish")
+
+FishingBox:AddToggle("FishingAutoFish", {
+    Text = "Auto fish",
+    Default = false,
+})
+
+local fishingLoopRunning = false
+
+Toggles.FishingAutoFish:OnChanged(function(enabled)
+    FishingState.AutoFish = enabled
+    FishingState.StopRequested = not enabled
+
+    if not enabled or fishingLoopRunning then
+        return
+    end
+
+    fishingLoopRunning = true
+
+    task.spawn(function()
+        while canContinueFishing() do
+            local ok = runFishingCycle()
+            task.wait(ok and FishingCycleDelay or FishingIdleDelay)
+        end
+
+        fishingLoopRunning = false
+    end)
+end)
+
+local previousCleanup = cleanup
+cleanup = function()
+    previousCleanup()
+    FishingState.StopRequested = true
+end
 end)
 
 if not MainOk then
@@ -3037,7 +3298,7 @@ end
 if SaveManager then
     SaveManager:SetLibrary(Library)
     SaveManager:IgnoreThemeSettings()
-    SaveManager:SetIgnoreIndexes({ "MenuKeybind", "MiningAutoFarm" })
+    SaveManager:SetIgnoreIndexes({ "MenuKeybind", "MiningAutoFarm", "FishingAutoFish" })
     SaveManager:SetFolder("voidra")
     SaveManager:SetSubFolder(tostring(game.PlaceId))
     SaveManager:BuildConfigSection(Tabs.Settings)
