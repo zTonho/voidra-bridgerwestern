@@ -144,6 +144,7 @@ local State = {
         AutoFish = false,
         AutoSell = false,
         AutoStore = false,
+        AutoStoreValuables = false,
         StoreFilter = {
             All = true,
         },
@@ -229,10 +230,10 @@ local FishingOwnedGrabScanRadius = 90
 local FishingHeldDropDelay = 0.12
 local FishingSellAfterCatchDelay = 0.02
 local FishingAutoStoreDelay = 0.45
-local FishingSellDropSpacing = 4
-local FishingSellDropHeight = 1.25
-local FishingSellMoveRepeats = 5
-local FishingSellStepDelay = 0.003
+local FishingSellDropSpacing = 2.5
+local FishingSellDropHeight = 0.9
+local FishingSellMoveRepeats = 12
+local FishingSellStepDelay = 0.004
 local FishingSellSettleDelay = 0.12
 local FishingSellDealRepeats = 3
 local FishingHoverMover = nil
@@ -790,16 +791,17 @@ local function getFishSellDropPosition(slot)
         return nil
     end
 
-    local columns = math.max(1, math.min(6, math.floor(size.X / FishingSellDropSpacing)))
     local index = slot - 1
-    local column = index % columns
-    local row = math.floor(index / columns)
-    local xLimit = math.max(1, (size.X / 2) - 2)
-    local zLimit = math.max(1, (size.Z / 2) - 2)
-    local xOffset = math.clamp((column - ((columns - 1) / 2)) * FishingSellDropSpacing, -xLimit, xLimit)
+    local gridSize = 3
+    local column = (index % gridSize) - 1
+    local row = (math.floor(index / gridSize) % gridSize) - 1
+    local layer = math.floor(index / (gridSize * gridSize))
+    local xLimit = math.max(0.75, (size.X / 2) - 2.5)
+    local zLimit = math.max(0.75, (size.Z / 2) - 2.5)
+    local xOffset = math.clamp(column * FishingSellDropSpacing, -xLimit, xLimit)
     local zOffset = math.clamp(row * FishingSellDropSpacing, -zLimit, zLimit)
 
-    return Vector3.new(position.X + xOffset, dropY, position.Z + zOffset)
+    return Vector3.new(position.X + xOffset, dropY + math.min(layer * 0.4, 2), position.Z + zOffset)
 end
 
 local function getNauticSellaryInteract()
@@ -947,7 +949,11 @@ local function detachCatchLocal(root)
     end)
 end
 
-function getCatchParts()
+function getCatchParts(includeOwnedGrabLoot)
+    if includeOwnedGrabLoot == nil then
+        includeOwnedGrabLoot = true
+    end
+
     local parts = {}
     local seen = {}
 
@@ -981,7 +987,7 @@ function getCatchParts()
         end
     end
 
-    local grab = workspace:FindFirstChild("Grab")
+    local grab = includeOwnedGrabLoot and workspace:FindFirstChild("Grab") or nil
 
     if grab then
         for _, object in ipairs(grab:GetChildren()) do
@@ -1033,16 +1039,6 @@ local function moveCatchToSell(entry, destination)
     end
 
     local moved = mainCallRemote(grabHandler, part, "Grab", startPosition)
-    setCatchAt(part, root, destination)
-    moved = mainCallRemote(grabHandler, part, "Grab", destination) or moved
-    task.wait(FishingSellStepDelay)
-
-    for i = 1, FishingSellMoveRepeats do
-        local position = startPosition:Lerp(destination, i / FishingSellMoveRepeats)
-        setCatchAt(part, root, position)
-        moved = mainCallRemote(grabHandler, part, "Grab", position) or moved
-        task.wait(FishingSellStepDelay)
-    end
 
     for _ = 1, FishingSellMoveRepeats do
         setCatchAt(part, root, destination)
@@ -1051,6 +1047,7 @@ local function moveCatchToSell(entry, destination)
     end
 
     mainCallRemote(grabHandler, part, "Ungrab")
+    setCatchAt(part, root, destination)
     return moved
 end
 
@@ -1113,6 +1110,25 @@ local function fishingStoreFilterAllows(entry)
     return false
 end
 
+local FishingValuableLootNames = {
+    ["Bronze Key"] = true,
+    ["Silver Key"] = true,
+    ["Gold Key"] = true,
+    ["Rusty Chest"] = true,
+    ["Silver Chest"] = true,
+    ["Golden Chest"] = true,
+}
+
+local function isFishingValuableLoot(entry)
+    for name in pairs(getLootNameCandidates(entry)) do
+        if FishingValuableLootNames[name] then
+            return true
+        end
+    end
+
+    return false
+end
+
 local function getFishingLootFilterValues()
     local values = { "All" }
     local seen = {
@@ -1153,7 +1169,7 @@ local function refreshFishingLootFilter()
     end
 end
 
-local function storeFishCatchesAtBase()
+local function storeFishCatchesAtBase(filterFn)
     if not getMainPlotDropPosition(1) then
         finishFishingAtBase()
         return false
@@ -1168,7 +1184,7 @@ local function storeFishCatchesAtBase()
     local moved = 0
 
     for _, entry in ipairs(catches) do
-        if fishingStoreFilterAllows(entry) then
+        if (filterFn and filterFn(entry)) or (not filterFn and fishingStoreFilterAllows(entry)) then
             local destination = getMainPlotDropPosition(moved + 1)
 
             if destination and moveCatchToSell(entry, destination) then
@@ -1188,7 +1204,7 @@ local function sellFishCatches()
         return 0
     end
 
-    local catches = getCatchParts()
+    local catches = getCatchParts(false)
 
     if #catches == 0 then
         mainNotify("No caught fish found.")
@@ -1271,7 +1287,6 @@ FishingBox:AddToggle("FishingAutoFish", {
     Default = false,
 })
 
-FishingBox:AddDivider("Hotspots")
 FishingBox:AddToggle("FishingUseHotspots", {
     Text = "Use hotspots",
     Default = true,
@@ -1315,8 +1330,14 @@ FishingBox:AddToggle("FishingAutoStore", {
     Default = false,
 })
 
+FishingBox:AddToggle("FishingAutoStoreValuables", {
+    Text = "Auto store keys/chests",
+    Default = false,
+})
+
 local fishingLoopRunning = false
 local fishingStoreLoopRunning = false
+local fishingValuableStoreLoopRunning = false
 
 Toggles.FishingUseHotspots:OnChanged(function(enabled)
     FishingState.UseHotspots = enabled
@@ -1348,6 +1369,25 @@ Toggles.FishingAutoStore:OnChanged(function(enabled)
         end
 
         fishingStoreLoopRunning = false
+    end)
+end)
+
+Toggles.FishingAutoStoreValuables:OnChanged(function(enabled)
+    FishingState.AutoStoreValuables = enabled
+
+    if not enabled or fishingValuableStoreLoopRunning then
+        return
+    end
+
+    fishingValuableStoreLoopRunning = true
+
+    task.spawn(function()
+        while Toggles.FishingAutoStoreValuables and Toggles.FishingAutoStoreValuables.Value do
+            storeFishCatchesAtBase(isFishingValuableLoot)
+            task.wait(FishingAutoStoreDelay)
+        end
+
+        fishingValuableStoreLoopRunning = false
     end)
 end)
 
@@ -4195,7 +4235,7 @@ end
 if SaveManager then
     SaveManager:SetLibrary(Library)
     SaveManager:IgnoreThemeSettings()
-    SaveManager:SetIgnoreIndexes({ "MenuKeybind", "MiningAutoFarm", "FishingAutoFish", "FishingAutoSell", "FishingAutoStore", "FishingStoreLootFilter" })
+    SaveManager:SetIgnoreIndexes({ "MenuKeybind", "MiningAutoFarm", "FishingAutoFish", "FishingAutoSell", "FishingAutoStore", "FishingAutoStoreValuables", "FishingStoreLootFilter" })
     SaveManager:SetFolder("voidra")
     SaveManager:SetSubFolder(tostring(game.PlaceId))
     SaveManager:BuildConfigSection(Tabs.Settings)
