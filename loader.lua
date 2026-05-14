@@ -237,7 +237,7 @@ end
 local TalentsBox = Tabs.Main:AddLeftGroupbox("Talents", "sparkles")
 
 TalentsBox:AddButton({
-    Text = "Claim Tool Reaper",
+    Text = "Get Tool Reaper",
     Func = function()
         claimQuestReward("MaroonsQuest", "Tool Reaper")
     end,
@@ -780,6 +780,9 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer = Players.LocalPlayer or Players.PlayerAdded:Wait()
 local MiningState = State.Mining
 local MiningChargeTime = 0.63
+local MiningSensitiveChargeTime = 0.9
+local MiningSensitiveChargeDelay = 0.85
+local MiningSensitiveAttackBurstCount = 1
 local MiningActionDelay = 0.015
 local MiningTeleportOffset = 5
 local MiningIdleDelay = 0.35
@@ -920,6 +923,11 @@ local OreLookup = {}
 for _, oreName in ipairs(OreNames) do
     OreLookup[oreName] = true
 end
+
+local ChargeSensitiveOres = {
+    Blastshard = true,
+    Voltshard = true,
+}
 
 local OreLoadSpots = {
     Abyssalite = { Vector3.new(-7066.40, -534.32, -2874.44) },
@@ -1299,6 +1307,16 @@ local function getSellZoneDropPosition(slot, part)
     return getGridDropPosition(position, size, topY, slot, part, MiningSellDropSpacing, 8, 2, 1.5)
 end
 
+local function getSellZoneStandPosition()
+    local position, _, topY = getSellZoneData()
+
+    if not position then
+        return nil
+    end
+
+    return Vector3.new(position.X, topY + MiningTeleportOffset, position.Z)
+end
+
 local function getPlayerDropPosition(slot, part)
     local root = getRoot()
 
@@ -1502,6 +1520,11 @@ local function normalizeOreName(name)
     end
 
     return nil
+end
+
+local function isChargeSensitiveOre(ore)
+    local oreName = ore and normalizeOreName(ore.Name)
+    return oreName and ChargeSensitiveOres[oreName] == true
 end
 
 local function getNumericValue(object)
@@ -2543,6 +2566,35 @@ local function bringSafeOresToPlayer()
     return moved
 end
 
+local TeleportsBox = Tabs.Teleports:AddLeftGroupbox("Locations", "map-pin")
+
+local function teleportToLocation(position, name)
+    if not position then
+        miningNotify(name .. " was not found.")
+        return
+    end
+
+    if setCharacterExactAt(position) then
+        miningNotify("Teleported to " .. name .. ".")
+    else
+        miningNotify("Character root was not found.")
+    end
+end
+
+TeleportsBox:AddButton({
+    Text = "Base",
+    Func = function()
+        teleportToLocation(getPlotStandPosition(), "base")
+    end,
+})
+
+TeleportsBox:AddButton({
+    Text = "Sell Zone",
+    Func = function()
+        teleportToLocation(getSellZoneStandPosition(), "sell zone")
+    end,
+})
+
 local function teleportNear(position, force)
     local root = getRoot()
 
@@ -2623,12 +2675,7 @@ local function loadOreSpots(oreFilter, stopWhenToggleOff, force)
         end
     end
 
-    if getNearestOreTarget(oreFilter) then
-        miningNotify("Ores loaded.")
-        return true
-    end
-
-    return false
+    return getNearestOreTarget(oreFilter) ~= nil
 end
 
 local function refreshOreEntry(entry)
@@ -2689,6 +2736,7 @@ local function mineTarget(entry, stopWhenToggleOff, stopOnUnequip)
     local trackedPickaxe = stopOnUnequip and getEquippedPickaxe() or pickaxe
     local maxChargeMisses = stopOnUnequip and MiningGetOreMaxChargeMisses or MiningMaxChargeMisses
     local canMine, pickaxeTier, oreTier = canPickaxeMineOre(pickaxe, entry.Ore)
+    local chargeSensitiveOre = isChargeSensitiveOre(entry.Ore)
 
     if not canMine then
         miningWarn(("Pickaxe tier too low. Pickaxe: %s | Ore: %s."):format(
@@ -2771,7 +2819,6 @@ local function mineTarget(entry, stopWhenToggleOff, stopOnUnequip)
         })
 
         if not waitForChargeGui() then
-            miningWarn("Charge did not start. Pickaxe may be on cooldown.")
             task.wait(MiningCooldownDelay)
             chargeMisses = chargeMisses + 1
 
@@ -2786,8 +2833,14 @@ local function mineTarget(entry, stopWhenToggleOff, stopOnUnequip)
             chargeMisses = 0
 
             local attacksFired = 0
+            local attackBurstCount = chargeSensitiveOre and MiningSensitiveAttackBurstCount or MiningAttackBurstCount
+            local attackResponseTime = chargeSensitiveOre and MiningSensitiveChargeTime or MiningChargeTime
 
-            for burstIndex = 1, MiningAttackBurstCount do
+            if chargeSensitiveOre then
+                task.wait(MiningSensitiveChargeDelay)
+            end
+
+            for burstIndex = 1, attackBurstCount do
                 if shouldStopForUnequip() then
                     miningNotify("Get ore stopped: pickaxe unequipped.")
                     break
@@ -2800,7 +2853,7 @@ local function mineTarget(entry, stopWhenToggleOff, stopOnUnequip)
                 local attacked = pcall(function()
                     AttackRemote:FireServer({
                         Alpha = 1,
-                        ResponseTime = MiningChargeTime,
+                        ResponseTime = attackResponseTime,
                     })
                 end)
 
