@@ -149,7 +149,7 @@ local State = {
     Fishing = {
         AutoFish = false,
         AutoSell = false,
-        UseHotspots = true,
+        UseHotspots = false,
         StopRequested = false,
     },
     Mining = {
@@ -215,7 +215,7 @@ local FishingCastRotation = CFrame.new(0, 0, 0, -0, 1, -0, -0, 0, -1, -1, 0, -0)
 local FishingAttackAlpha = 1
 local FishingAttackResponseTime = 0
 local FishingCastAttackDelay = 0
-local FishingAutoCastInterval = 0.6
+local FishingAutoCastInterval = 0.8
 local FishingAutoCatchPollDelay = 0.08
 local FishingPreCastRecallDelay = 0
 local FishingPostCatchCastDelay = 0.65
@@ -239,6 +239,8 @@ local FishingCatchingSettleDelay = 0.015
 local FishingPostReelDelay = 0.005
 local FishingCycleDelay = 0.005
 local FishingIdleDelay = 0.2
+local FishingAllowHotspotTeleport = false
+local FishingAllowAutoSellDuringAutoFish = false
 local FishingBaseTeleportOffset = 5
 local FishingBaseDropSpacing = 4
 local FishingBaseDropHeight = 1.25
@@ -762,7 +764,7 @@ end
 local function getFishingCastData()
     local _, hotspotPosition, hotspotDistance = nil, nil, nil
 
-    if FishingState.UseHotspots then
+    if FishingState.UseHotspots and FishingAllowHotspotTeleport then
         _, hotspotPosition, hotspotDistance = getBestFishingHotspot()
     end
 
@@ -840,7 +842,7 @@ local function triggerFishingCatchFromAttribute(reelHitRemote, reelEndRemote, si
 
     task.wait(FishingCatchingSettleDelay)
 
-    if LastFishingCastUsedHotspot then
+    if LastFishingCastUsedHotspot and FishingAllowHotspotTeleport then
         stopFishingHover()
         setMainCharacterAt(FishingHotspotSafeDropPosition)
         task.wait(FishingHotspotPreEndDropDelay)
@@ -941,7 +943,7 @@ local function runFishingCycle(singleRun)
 
     local caught = triggerFishingCatchFromAttribute(reelHitRemote, reelEndRemote, singleRun)
 
-    if caught and LastFishingCastUsedHotspot then
+    if caught and LastFishingCastUsedHotspot and FishingAllowHotspotTeleport then
         moveHotspotCatchesToSafeSpot()
     end
 
@@ -1596,7 +1598,7 @@ FishingBox:AddToggle("FishingAutoFish", {
 
 FishingBox:AddToggle("FishingUseHotspots", {
     Text = "Use hotspots",
-    Default = true,
+    Default = false,
 })
 
 FishingBox:AddDivider("Storage")
@@ -1631,6 +1633,16 @@ local fishingLoopRunning = false
 local fishingCatchLoopRunning = false
 
 Toggles.FishingUseHotspots:OnChanged(function(enabled)
+    if enabled and not FishingAllowHotspotTeleport then
+        mainNotify("Hotspots disabled for anticheat safety.")
+
+        if Toggles.FishingUseHotspots then
+            Toggles.FishingUseHotspots:SetValue(false)
+        end
+
+        return
+    end
+
     FishingState.UseHotspots = enabled
 end)
 
@@ -1664,11 +1676,11 @@ Toggles.FishingAutoFish:OnChanged(function(enabled)
                 if reelHitRemote and reelEndRemote and isFishingCatchingActive() then
                     local caught = triggerFishingCatchFromAttribute(reelHitRemote, reelEndRemote, false)
 
-                    if caught and LastFishingCastUsedHotspot then
+                    if caught and LastFishingCastUsedHotspot and FishingAllowHotspotTeleport then
                         moveHotspotCatchesToSafeSpot()
                     end
 
-                    if caught and FishingState.AutoSell and not FishingSellRunning then
+                    if caught and FishingState.AutoSell and FishingAllowAutoSellDuringAutoFish and not FishingSellRunning then
                         task.spawn(function()
                             task.wait(FishingSellAfterCatchDelay)
                             sellFishCatches()
