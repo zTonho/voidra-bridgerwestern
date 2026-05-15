@@ -215,7 +215,7 @@ local FishingCastRotation = CFrame.new(0, 0, 0, -0, 1, -0, -0, 0, -1, -1, 0, -0)
 local FishingAttackAlpha = 1
 local FishingAttackResponseTime = 0
 local FishingCastAttackDelay = 0
-local FishingAutoCastInterval = 0.8
+local FishingAutoCastInterval = 0.6
 local FishingAutoCatchPollDelay = 0.08
 local FishingPreCastRecallDelay = 0
 local FishingPostCatchCastDelay = 0.65
@@ -2333,12 +2333,12 @@ local MiningDropMaxColumns = 7
 local MiningPlotInset = 5
 local MiningBringRadius = 18
 local MiningSellDropSpacing = 4
-local MiningSellMoveSteps = 4
-local MiningSellStepDelay = 0.006
-local MiningSellFinalRepeats = 14
-local MiningSellReleaseRepeats = 6
+local MiningSellMoveSteps = 1
+local MiningSellStepDelay = 0.001
+local MiningSellFinalRepeats = 6
+local MiningSellReleaseRepeats = 2
 local MiningSellRetryDistance = 10
-local MiningSellBatchDelay = 0.001
+local MiningSellBatchDelay = 0
 local MiningMaxChargeMisses = 20
 local LastMiningWarning = 0
 local LastMiningOreSpotLoad = {}
@@ -3430,7 +3430,9 @@ local function moveGrabPartToSell(part, destination)
     end
 
     moved = callGrabHandler(part, "Grab", startPosition) or moved
-    task.wait(MiningSellStepDelay)
+    if MiningSellStepDelay > 0 then
+        task.wait(MiningSellStepDelay)
+    end
 
     for i = 1, MiningSellMoveSteps do
         if not part.Parent then
@@ -3442,7 +3444,9 @@ local function moveGrabPartToSell(part, destination)
 
         setSellPartAt(position)
         moved = callGrabHandler(part, "Grab", position) or moved
-        task.wait(MiningSellStepDelay)
+        if MiningSellStepDelay > 0 then
+            task.wait(MiningSellStepDelay)
+        end
     end
 
     for _ = 1, MiningSellFinalRepeats do
@@ -3452,7 +3456,9 @@ local function moveGrabPartToSell(part, destination)
 
         setSellPartAt(destination)
         moved = callGrabHandler(part, "Grab", destination) or moved
-        task.wait(MiningSellStepDelay)
+        if MiningSellStepDelay > 0 then
+            task.wait(MiningSellStepDelay)
+        end
     end
 
     for _ = 1, MiningSellReleaseRepeats do
@@ -3462,7 +3468,9 @@ local function moveGrabPartToSell(part, destination)
 
         setSellPartAt(destination)
         callGrabHandler(part, "Ungrab")
-        task.wait(MiningSellStepDelay)
+        if MiningSellStepDelay > 0 then
+            task.wait(MiningSellStepDelay)
+        end
     end
 
     local finalPosition = getPosition(part)
@@ -3475,7 +3483,9 @@ local function moveGrabPartToSell(part, destination)
 
             setSellPartAt(destination)
             moved = callGrabHandler(part, "Grab", destination) or moved
-            task.wait(MiningSellStepDelay)
+            if MiningSellStepDelay > 0 then
+                task.wait(MiningSellStepDelay)
+            end
         end
 
         for _ = 1, MiningSellReleaseRepeats do
@@ -3485,7 +3495,9 @@ local function moveGrabPartToSell(part, destination)
 
             setSellPartAt(destination)
             callGrabHandler(part, "Ungrab")
-            task.wait(MiningSellStepDelay)
+            if MiningSellStepDelay > 0 then
+                task.wait(MiningSellStepDelay)
+            end
         end
     end
 
