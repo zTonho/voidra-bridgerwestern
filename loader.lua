@@ -216,7 +216,7 @@ local FishingAttackAlpha = 1
 local FishingAttackResponseTime = 0
 local FishingCastAttackDelay = 0
 local FishingAutoCastInterval = 0.6
-local FishingAutoCatchPollDelay = 0.05
+local FishingAutoCatchPollDelay = 0.08
 local FishingPreCastRecallDelay = 0
 local FishingPostCatchCastDelay = 0.65
 local FishingLineLandDelay = 0.48
@@ -227,10 +227,11 @@ local FishingHotspotStandHeight = 9
 local FishingHotspotSafeDropSpacing = 2
 local FishingHotspotSafeDropIgnoreRadius = 12
 local FishingHotspotLootMoveDelay = 0.08
+local FishingHotspotMaxMovePerPass = 10
 local FishingReelWaitTimeout = 6
 local FishingReelPollDelay = 0.04
-local FishingReelHitRepeats = 14
-local FishingReelHitBatchSize = 4
+local FishingReelHitRepeats = 10
+local FishingReelHitBatchSize = 2
 local FishingReelEndRepeats = 1
 local FishingCatchingSettleDelay = 0.015
 local FishingPostReelDelay = 0.005
@@ -253,9 +254,12 @@ local FishingStoreStepDelay = 0
 local FishingSellSettleDelay = 0.05
 local FishingSellDealRepeats = 2
 local FishingSellDealDelay = 0.04
+local FishingSellBatchYieldEvery = 8
 local FishingHoverMover = nil
 local getCatchParts
 local moveHotspotCatchesToSafeSpot
+local FishingSellRunning = false
+local FishingHotspotMoveRunning = false
 local LastFishingCatchAt = 0
 local LastFishingCastLandDelay = FishingLineLandDelay
 local LastFishingCastUsedHotspot = false
@@ -1326,6 +1330,11 @@ local function isCatchNearFishingHotspotSafeDrop(entry)
 end
 
 moveHotspotCatchesToSafeSpot = function()
+    if FishingHotspotMoveRunning then
+        return false
+    end
+
+    FishingHotspotMoveRunning = true
     task.wait(FishingHotspotLootMoveDelay)
 
     local moved = 0
@@ -1339,10 +1348,15 @@ moveHotspotCatchesToSafeSpot = function()
 
             if fastMoveCatchToSell(entry, destination) then
                 moved = moved + 1
+
+                if moved >= FishingHotspotMaxMovePerPass then
+                    break
+                end
             end
         end
     end
 
+    FishingHotspotMoveRunning = false
     return moved > 0
 end
 
@@ -1461,18 +1475,29 @@ local function storeFishCatchesAtBase(filterFn)
 end
 
 local function sellFishCatches()
+    if FishingSellRunning then
+        return 0
+    end
+
+    FishingSellRunning = true
+
+    local function finish(result)
+        FishingSellRunning = false
+        return result
+    end
+
     local firstDropPosition = getFishSellDropPosition(1)
 
     if not firstDropPosition then
         mainNotify("Nautic sell zone was not found.")
-        return 0
+        return finish(0)
     end
 
     local catches = getCatchParts(true)
 
     if #catches == 0 then
         mainNotify("No caught fish found.")
-        return 0
+        return finish(0)
     end
 
     local moved = 0
@@ -1483,13 +1508,17 @@ local function sellFishCatches()
 
             if destination and fastMoveCatchToSell(entry, destination) then
                 moved = moved + 1
+
+                if moved % FishingSellBatchYieldEvery == 0 then
+                    task.wait()
+                end
             end
         end
     end
 
     if moved <= 0 then
         mainNotify("No fish around you to sell.")
-        return 0
+        return finish(0)
     end
 
     task.wait(FishingSellSettleDelay)
@@ -1507,7 +1536,7 @@ local function sellFishCatches()
         mainNotify("Nautic Sellary was not found.")
     end
 
-    return moved
+    return finish(moved)
 end
 
 local TalentsBox = Tabs.Main:AddRightGroupbox("Talents", "sparkles")
@@ -1625,7 +1654,7 @@ Toggles.FishingAutoFish:OnChanged(function(enabled)
                         moveHotspotCatchesToSafeSpot()
                     end
 
-                    if caught and FishingState.AutoSell then
+                    if caught and FishingState.AutoSell and not FishingSellRunning then
                         task.spawn(function()
                             task.wait(FishingSellAfterCatchDelay)
                             sellFishCatches()
