@@ -211,8 +211,11 @@ local FishingSpotPosition = Vector3.new(1768.35, 3.03, -1398.29)
 local FishingCastCFrame = CFrame.new(1743.9234619140625, -5.975002288818359, -1410.97705078125, -0, 1, -0, -0, 0, -1, -1, 0, -0)
 local FishingCastRotation = CFrame.new(0, 0, 0, -0, 1, -0, -0, 0, -1, -1, 0, -0)
 local FishingAttackAlpha = 1
-local FishingAttackResponseTime = 0.35
-local FishingCastAttackDelay = 0.02
+local FishingAttackResponseTime = 0
+local FishingCastAttackDelay = 0
+local FishingAutoCastInterval = 1
+local FishingAutoCatchPollDelay = 0.02
+local FishingPreCastRecallDelay = 0
 local FishingLineLandDelay = 0.48
 local FishingReelWaitTimeout = 6
 local FishingReelPollDelay = 0.04
@@ -230,8 +233,10 @@ local FishingOwnedGrabScanRadius = 90
 local FishingHeldDropDelay = 0.12
 local FishingSellAfterCatchDelay = 0.02
 local FishingAutoStoreDelay = 0.45
-local FishingSellDropSpacing = 2.5
-local FishingSellDropHeight = 0.9
+local FishingSellDropSpacing = 1.35
+local FishingSellDropHeight = 0.7
+local FishingSellCenterBiasScale = 0.18
+local FishingSellMaxGridOffset = 1.8
 local FishingSellMoveRepeats = 12
 local FishingSellStepDelay = 0.004
 local FishingSellSettleDelay = 0.12
@@ -700,13 +705,11 @@ local function triggerFishingCatchFromAttribute(reelHitRemote, reelEndRemote, si
     return hits > 0
 end
 
-local function runFishingCycle(singleRun)
+local function castFishingLine(forceRecall)
     local chargeRemote = getEventsChild("Tools", "Charge")
     local attackRemote = getEventsChild("Tools", "Attack")
-    local reelHitRemote = getEventsChild("Fish", "ReelSessionHit")
-    local reelEndRemote = getEventsChild("Fish", "ReelSessionEnd")
 
-    if not chargeRemote or not attackRemote or not reelHitRemote or not reelEndRemote then
+    if not chargeRemote or not attackRemote then
         mainNotify("Fishing remotes were not found.")
         return false
     end
@@ -729,6 +732,11 @@ local function runFishingCycle(singleRun)
         return false
     end
 
+    if forceRecall then
+        mainCallRemote(chargeRemote, {})
+        task.wait(FishingPreCastRecallDelay)
+    end
+
     mainCallRemote(chargeRemote, {
         HitPosition = castCFrame,
     })
@@ -741,6 +749,22 @@ local function runFishingCycle(singleRun)
         Alpha = FishingAttackAlpha,
         ResponseTime = FishingAttackResponseTime,
     })
+
+    return true
+end
+
+local function runFishingCycle(singleRun)
+    local reelHitRemote = getEventsChild("Fish", "ReelSessionHit")
+    local reelEndRemote = getEventsChild("Fish", "ReelSessionEnd")
+
+    if not reelHitRemote or not reelEndRemote then
+        mainNotify("Fishing remotes were not found.")
+        return false
+    end
+
+    if not castFishingLine(false) then
+        return false
+    end
 
     task.wait(FishingLineLandDelay)
 
@@ -766,19 +790,36 @@ local function getFishSellZoneData()
         return nil, nil, nil
     end
 
+    local function biasInsideSellZone(position, size)
+        local talkPart = sellary and (sellary:FindFirstChild("TalkPart") or sellary:FindFirstChild("TalkPart", true))
+
+        if not talkPart or not talkPart:IsA("BasePart") then
+            return position
+        end
+
+        local direction = Vector3.new(talkPart.Position.X - position.X, 0, talkPart.Position.Z - position.Z)
+
+        if direction.Magnitude <= 0.01 then
+            return position
+        end
+
+        local biasDistance = math.min(size.X, size.Z) * FishingSellCenterBiasScale
+        return position + direction.Unit * biasDistance
+    end
+
     local target = sellZone:FindFirstChild("Area", true)
 
     if target and target:IsA("BasePart") then
-        return target.Position, target.Size, target.Position.Y + (target.Size.Y / 2) + 0.5
+        return biasInsideSellZone(target.Position, target.Size), target.Size, target.Position.Y + (target.Size.Y / 2) + 0.5
     end
 
     if sellZone:IsA("Model") then
         local cframe, size = sellZone:GetBoundingBox()
-        return cframe.Position, size, cframe.Position.Y - (size.Y / 2) + FishingSellDropHeight
+        return biasInsideSellZone(cframe.Position, size), size, cframe.Position.Y - (size.Y / 2) + FishingSellDropHeight
     end
 
     if sellZone:IsA("BasePart") then
-        return sellZone.Position, sellZone.Size, sellZone.Position.Y + (sellZone.Size.Y / 2) + 0.5
+        return biasInsideSellZone(sellZone.Position, sellZone.Size), sellZone.Size, sellZone.Position.Y + (sellZone.Size.Y / 2) + 0.5
     end
 
     return nil, nil, nil
@@ -796,12 +837,12 @@ local function getFishSellDropPosition(slot)
     local column = (index % gridSize) - 1
     local row = (math.floor(index / gridSize) % gridSize) - 1
     local layer = math.floor(index / (gridSize * gridSize))
-    local xLimit = math.max(0.75, (size.X / 2) - 2.5)
-    local zLimit = math.max(0.75, (size.Z / 2) - 2.5)
+    local xLimit = math.min(FishingSellMaxGridOffset, math.max(0.5, (size.X / 2) - 3))
+    local zLimit = math.min(FishingSellMaxGridOffset, math.max(0.5, (size.Z / 2) - 3))
     local xOffset = math.clamp(column * FishingSellDropSpacing, -xLimit, xLimit)
     local zOffset = math.clamp(row * FishingSellDropSpacing, -zLimit, zLimit)
 
-    return Vector3.new(position.X + xOffset, dropY + math.min(layer * 0.4, 2), position.Z + zOffset)
+    return Vector3.new(position.X + xOffset, dropY + math.min(layer * 0.35, 1.5), position.Z + zOffset)
 end
 
 local function getNauticSellaryInteract()
@@ -1338,6 +1379,7 @@ FishingBox:AddToggle("FishingAutoStoreValuables", {
 local fishingLoopRunning = false
 local fishingStoreLoopRunning = false
 local fishingValuableStoreLoopRunning = false
+local fishingCatchLoopRunning = false
 
 Toggles.FishingUseHotspots:OnChanged(function(enabled)
     FishingState.UseHotspots = enabled
@@ -1406,9 +1448,37 @@ Toggles.FishingAutoFish:OnChanged(function(enabled)
 
     fishingLoopRunning = true
 
+    if not fishingCatchLoopRunning then
+        fishingCatchLoopRunning = true
+
+        task.spawn(function()
+            local reelHitRemote = getEventsChild("Fish", "ReelSessionHit")
+            local reelEndRemote = getEventsChild("Fish", "ReelSessionEnd")
+
+            while canContinueFishing() do
+                if reelHitRemote and reelEndRemote and isFishingCatchingActive() then
+                    local caught = triggerFishingCatchFromAttribute(reelHitRemote, reelEndRemote, false)
+
+                    if caught and FishingState.AutoSell then
+                        task.spawn(function()
+                            task.wait(FishingSellAfterCatchDelay)
+                            sellFishCatches()
+                        end)
+                    elseif caught and FishingState.AutoStore then
+                        task.spawn(storeFishCatchesAtBase)
+                    end
+                end
+
+                task.wait(FishingAutoCatchPollDelay)
+            end
+
+            fishingCatchLoopRunning = false
+        end)
+    end
+
     task.spawn(function()
         while canContinueFishing() do
-            local ok, result = pcall(runFishingCycle, false)
+            local ok, result = pcall(castFishingLine, true)
 
             if not ok then
                 warn("[voidra] Auto fish failed: " .. tostring(result))
@@ -1416,17 +1486,7 @@ Toggles.FishingAutoFish:OnChanged(function(enabled)
             end
 
             local cycleOk = ok and result == true
-
-            if cycleOk and FishingState.AutoSell then
-                task.spawn(function()
-                    task.wait(FishingSellAfterCatchDelay)
-                    sellFishCatches()
-                end)
-            elseif cycleOk and FishingState.AutoStore then
-                task.spawn(storeFishCatchesAtBase)
-            end
-
-            task.wait(cycleOk and FishingCycleDelay or FishingIdleDelay)
+            task.wait(cycleOk and FishingAutoCastInterval or FishingIdleDelay)
         end
 
         finishFishingAtBase()
@@ -4130,7 +4190,7 @@ end
 
 local MiningBox = Tabs.Mining:AddLeftGroupbox("Autofarm", "pickaxe")
 
-MiningBox:AddLabel("âš  High ping may affect farm.")
+MiningBox:AddLabel("⚠ High ping may affect farm.")
 
 MiningBox:AddDropdown("MiningOreFilter", {
     Text = "Ore",
