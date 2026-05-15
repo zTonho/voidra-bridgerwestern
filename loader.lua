@@ -1,5 +1,6 @@
 local Repo = "https://raw.githubusercontent.com/zTonho/voidra-bridgerwestern/refs/heads/dev-test/"
 local ObsidianRepo = "https://raw.githubusercontent.com/deividcomsono/Obsidian/refs/heads/main/"
+local ScriptFolderName = "voidra"
 local CacheToken = tostring(os.time())
 
 local function fetchFrom(repo, path)
@@ -47,6 +48,11 @@ end
 
 local function run(path)
     local source = fetch(path)
+
+    if path == "addons/SaveManager.lua" or path == "addons/ThemeManager.lua" then
+        source = source:gsub('Folder%s*=%s*"ObsidianLibSettings"', 'Folder = "' .. ScriptFolderName .. '"')
+    end
+
     local chunk, compileError = loadstring(source)
 
     if not chunk then
@@ -143,11 +149,6 @@ local State = {
     Fishing = {
         AutoFish = false,
         AutoSell = false,
-        AutoStore = false,
-        AutoStoreValuables = false,
-        StoreFilter = {
-            All = true,
-        },
         UseHotspots = true,
         StopRequested = false,
     },
@@ -216,6 +217,7 @@ local FishingCastAttackDelay = 0
 local FishingAutoCastInterval = 1
 local FishingAutoCatchPollDelay = 0.02
 local FishingPreCastRecallDelay = 0
+local FishingPostCatchCastDelay = 0.65
 local FishingLineLandDelay = 0.48
 local FishingReelWaitTimeout = 6
 local FishingReelPollDelay = 0.04
@@ -232,7 +234,6 @@ local FishingBaseDropHeight = 1.25
 local FishingOwnedGrabScanRadius = 90
 local FishingHeldDropDelay = 0.12
 local FishingSellAfterCatchDelay = 0.02
-local FishingAutoStoreDelay = 0.45
 local FishingSellDropSpacing = 1.35
 local FishingSellDropHeight = 0.7
 local FishingSellCenterBiasScale = 0.18
@@ -243,6 +244,7 @@ local FishingSellSettleDelay = 0.12
 local FishingSellDealRepeats = 3
 local FishingHoverMover = nil
 local getCatchParts
+local LastFishingCatchAt = 0
 local LastFishingHotspotWarning = 0
 local FishingHotspotWarningCooldown = 4
 
@@ -419,19 +421,38 @@ local function getMainLocalPlot()
     return nil
 end
 
-local function getMainPlotStandPosition()
+local function getMainPlotTarget()
     local plot = getMainLocalPlot()
 
     if not plot then
         return nil
     end
 
-    local target = plot:FindFirstChild("Plot")
+    return plot:FindFirstChild("Plot")
         or plot:FindFirstChild("ProjectionZone")
         or plot:FindFirstChild("Objects")
         or plot
+end
 
-    local position, _, topY = getMainAreaData(target, Vector3.new(36, 1, 36))
+local function getMainPlotAreaData()
+    return getMainAreaData(getMainPlotTarget(), Vector3.new(36, 1, 36))
+end
+
+local function isPositionInsideMainPlot(position, margin)
+    local center, size = getMainPlotAreaData()
+
+    if not position or not center or not size then
+        return false
+    end
+
+    margin = margin or 4
+
+    return math.abs(position.X - center.X) <= (size.X / 2) + margin
+        and math.abs(position.Z - center.Z) <= (size.Z / 2) + margin
+end
+
+local function getMainPlotStandPosition()
+    local position, _, topY = getMainPlotAreaData()
 
     if not position then
         return nil
@@ -441,18 +462,7 @@ local function getMainPlotStandPosition()
 end
 
 local function getMainPlotDropPosition(slot)
-    local plot = getMainLocalPlot()
-
-    if not plot then
-        return nil
-    end
-
-    local target = plot:FindFirstChild("Plot")
-        or plot:FindFirstChild("ProjectionZone")
-        or plot:FindFirstChild("Objects")
-        or plot
-
-    local position, size, topY = getMainAreaData(target, Vector3.new(36, 1, 36))
+    local position, size, topY = getMainPlotAreaData()
 
     if not position then
         return nil
@@ -582,7 +592,33 @@ end
 
 local function getFishingHotspotFolder()
     local mouseIgnore = workspace:FindFirstChild("MouseIgnore")
+        or workspace:FindFirstChild("Mouseignore")
+        or workspace:FindFirstChild("Mouseignore", true)
+        or workspace:FindFirstChild("MouseIgnore", true)
+
     return mouseIgnore and mouseIgnore:FindFirstChild("FishHotspots") or nil
+end
+
+local function getFishingHotspotPosition(hotspot)
+    if not hotspot then
+        return nil
+    end
+
+    if hotspot:IsA("BasePart") then
+        return hotspot.Position
+    end
+
+    local hitbox = hotspot:FindFirstChild("Hitbox", true)
+    if hitbox and hitbox:IsA("BasePart") then
+        return hitbox.Position
+    end
+
+    local part = hotspot:FindFirstChildWhichIsA("BasePart", true)
+    if part then
+        return part.Position
+    end
+
+    return getMainPosition(hotspot)
 end
 
 local function getBestFishingHotspot()
@@ -599,7 +635,7 @@ local function getBestFishingHotspot()
     local bestDistance = math.huge
 
     for _, hotspot in ipairs(folder:GetChildren()) do
-        local position = getMainPosition(hotspot)
+        local position = getFishingHotspotPosition(hotspot)
 
         if position then
             local distance = rootPosition and (position - rootPosition).Magnitude or 0
@@ -702,7 +738,12 @@ local function triggerFishingCatchFromAttribute(reelHitRemote, reelEndRemote, si
     end
 
     task.wait(FishingPostReelDelay)
-    return hits > 0
+    if hits > 0 then
+        LastFishingCatchAt = os.clock()
+        return true
+    end
+
+    return false
 end
 
 local function castFishingLine(forceRecall)
@@ -711,6 +752,10 @@ local function castFishingLine(forceRecall)
 
     if not chargeRemote or not attackRemote then
         mainNotify("Fishing remotes were not found.")
+        return false
+    end
+
+    if isFishingCatchingActive() or os.clock() - LastFishingCatchAt < FishingPostCatchCastDelay then
         return false
     end
 
@@ -1052,6 +1097,24 @@ local function isCatchHeld(entry)
         )
 end
 
+local function isCatchInsideMainPlot(entry)
+    if not entry then
+        return false
+    end
+
+    local plot = getMainLocalPlot()
+
+    if plot and (
+        (entry.Root and entry.Root:IsDescendantOf(plot))
+        or (entry.Part and entry.Part:IsDescendantOf(plot))
+    ) then
+        return true
+    end
+
+    local position = getMainPosition(entry.Root) or getMainPosition(entry.Part)
+    return isPositionInsideMainPlot(position, 5)
+end
+
 local function hasHeldFishingCatch()
     for _, entry in ipairs(getCatchParts()) do
         if isCatchHeld(entry) then
@@ -1135,22 +1198,6 @@ local function getLootNameCandidates(entry)
     return names
 end
 
-local function fishingStoreFilterAllows(entry)
-    local filter = FishingState.StoreFilter
-
-    if not filter or filter.All then
-        return true
-    end
-
-    for name in pairs(getLootNameCandidates(entry)) do
-        if filter[name] then
-            return true
-        end
-    end
-
-    return false
-end
-
 local FishingValuableLootNames = {
     ["Bronze Key"] = true,
     ["Silver Key"] = true,
@@ -1170,46 +1217,6 @@ local function isFishingValuableLoot(entry)
     return false
 end
 
-local function getFishingLootFilterValues()
-    local values = { "All" }
-    local seen = {
-        All = true,
-    }
-
-    for _, entry in ipairs(getCatchParts()) do
-        for name in pairs(getLootNameCandidates(entry)) do
-            if not seen[name] then
-                seen[name] = true
-                values[#values + 1] = name
-            end
-        end
-    end
-
-    table.sort(values, function(a, b)
-        if a == "All" then
-            return true
-        end
-
-        if b == "All" then
-            return false
-        end
-
-        return a:lower() < b:lower()
-    end)
-
-    return values
-end
-
-local function refreshFishingLootFilter()
-    if Options.FishingStoreLootFilter then
-        Options.FishingStoreLootFilter:SetValues(getFishingLootFilterValues())
-
-        if not next(FishingState.StoreFilter or {}) then
-            Options.FishingStoreLootFilter:SetValue({ "All" })
-        end
-    end
-end
-
 local function storeFishCatchesAtBase(filterFn)
     if not getMainPlotDropPosition(1) then
         finishFishingAtBase()
@@ -1225,7 +1232,7 @@ local function storeFishCatchesAtBase(filterFn)
     local moved = 0
 
     for _, entry in ipairs(catches) do
-        if (filterFn and filterFn(entry)) or (not filterFn and fishingStoreFilterAllows(entry)) then
+        if filterFn and filterFn(entry) then
             local destination = getMainPlotDropPosition(moved + 1)
 
             if destination and moveCatchToSell(entry, destination) then
@@ -1255,10 +1262,12 @@ local function sellFishCatches()
     local moved = 0
 
     for _, entry in ipairs(catches) do
-        local destination = getFishSellDropPosition(moved + 1)
+        if not isCatchInsideMainPlot(entry) then
+            local destination = getFishSellDropPosition(moved + 1)
 
-        if destination and moveCatchToSell(entry, destination) then
-            moved = moved + 1
+            if destination and moveCatchToSell(entry, destination) then
+                moved = moved + 1
+            end
         end
     end
 
@@ -1312,13 +1321,9 @@ FishingBox:AddButton({
 
             if cycleOk and FishingState.AutoSell then
                 sellFishCatches()
-                finishFishingAtBase()
-            elseif cycleOk then
-                storeFishCatchesAtBase()
-                finishFishingAtBase()
-            else
-                finishFishingAtBase()
             end
+
+            finishFishingAtBase()
         end)
     end,
 })
@@ -1334,19 +1339,6 @@ FishingBox:AddToggle("FishingUseHotspots", {
 })
 
 FishingBox:AddDivider("Storage")
-FishingBox:AddDropdown("FishingStoreLootFilter", {
-    Text = "Loot to store",
-    Values = { "All" },
-    Default = { "All" },
-    Multi = true,
-    Searchable = true,
-})
-
-FishingBox:AddButton({
-    Text = "Refresh loot list",
-    Func = refreshFishingLootFilter,
-})
-
 FishingBox:AddButton({
     Text = "Sell fish",
     Func = function()
@@ -1355,9 +1347,17 @@ FishingBox:AddButton({
 })
 
 FishingBox:AddButton({
-    Text = "Store loot",
+    Text = "Store keys/chests",
     Func = function()
-        task.spawn(storeFishCatchesAtBase)
+        task.spawn(function()
+            local moved = storeFishCatchesAtBase(isFishingValuableLoot)
+
+            if moved then
+                mainNotify("Keys/chests stored at base.")
+            else
+                mainNotify("No keys/chests found.")
+            end
+        end)
     end,
 })
 
@@ -1366,19 +1366,7 @@ FishingBox:AddToggle("FishingAutoSell", {
     Default = false,
 })
 
-FishingBox:AddToggle("FishingAutoStore", {
-    Text = "Auto store loot",
-    Default = false,
-})
-
-FishingBox:AddToggle("FishingAutoStoreValuables", {
-    Text = "Auto store keys/chests",
-    Default = false,
-})
-
 local fishingLoopRunning = false
-local fishingStoreLoopRunning = false
-local fishingValuableStoreLoopRunning = false
 local fishingCatchLoopRunning = false
 
 Toggles.FishingUseHotspots:OnChanged(function(enabled)
@@ -1387,50 +1375,6 @@ end)
 
 Toggles.FishingAutoSell:OnChanged(function(enabled)
     FishingState.AutoSell = enabled
-end)
-
-Options.FishingStoreLootFilter:OnChanged(function(value)
-    FishingState.StoreFilter = value or {
-        All = true,
-    }
-end)
-
-Toggles.FishingAutoStore:OnChanged(function(enabled)
-    FishingState.AutoStore = enabled
-
-    if not enabled or fishingStoreLoopRunning then
-        return
-    end
-
-    fishingStoreLoopRunning = true
-
-    task.spawn(function()
-        while Toggles.FishingAutoStore and Toggles.FishingAutoStore.Value do
-            storeFishCatchesAtBase()
-            task.wait(FishingAutoStoreDelay)
-        end
-
-        fishingStoreLoopRunning = false
-    end)
-end)
-
-Toggles.FishingAutoStoreValuables:OnChanged(function(enabled)
-    FishingState.AutoStoreValuables = enabled
-
-    if not enabled or fishingValuableStoreLoopRunning then
-        return
-    end
-
-    fishingValuableStoreLoopRunning = true
-
-    task.spawn(function()
-        while Toggles.FishingAutoStoreValuables and Toggles.FishingAutoStoreValuables.Value do
-            storeFishCatchesAtBase(isFishingValuableLoot)
-            task.wait(FishingAutoStoreDelay)
-        end
-
-        fishingValuableStoreLoopRunning = false
-    end)
 end)
 
 Toggles.FishingAutoFish:OnChanged(function(enabled)
@@ -1464,8 +1408,6 @@ Toggles.FishingAutoFish:OnChanged(function(enabled)
                             task.wait(FishingSellAfterCatchDelay)
                             sellFishCatches()
                         end)
-                    elseif caught and FishingState.AutoStore then
-                        task.spawn(storeFishCatchesAtBase)
                     end
                 end
 
@@ -1478,15 +1420,19 @@ Toggles.FishingAutoFish:OnChanged(function(enabled)
 
     task.spawn(function()
         while canContinueFishing() do
-            local ok, result = pcall(castFishingLine, true)
+            if isFishingCatchingActive() or os.clock() - LastFishingCatchAt < FishingPostCatchCastDelay then
+                task.wait(FishingAutoCatchPollDelay)
+            else
+                local ok, result = pcall(castFishingLine, true)
 
-            if not ok then
-                warn("[voidra] Auto fish failed: " .. tostring(result))
-                mainNotify("Auto fish failed. Check console.")
+                if not ok then
+                    warn("[voidra] Auto fish failed: " .. tostring(result))
+                    mainNotify("Auto fish failed. Check console.")
+                end
+
+                local cycleOk = ok and result == true
+                task.wait(cycleOk and FishingAutoCastInterval or FishingIdleDelay)
             end
-
-            local cycleOk = ok and result == true
-            task.wait(cycleOk and FishingAutoCastInterval or FishingIdleDelay)
         end
 
         finishFishingAtBase()
@@ -4295,7 +4241,7 @@ end
 if SaveManager then
     SaveManager:SetLibrary(Library)
     SaveManager:IgnoreThemeSettings()
-    SaveManager:SetIgnoreIndexes({ "MenuKeybind", "MiningAutoFarm", "FishingAutoFish", "FishingAutoSell", "FishingAutoStore", "FishingAutoStoreValuables", "FishingStoreLootFilter" })
+    SaveManager:SetIgnoreIndexes({ "MenuKeybind", "MiningAutoFarm", "FishingAutoFish", "FishingAutoSell" })
     SaveManager:SetFolder("voidra")
     SaveManager:SetSubFolder(tostring(game.PlaceId))
     SaveManager:BuildConfigSection(Tabs.Settings)
