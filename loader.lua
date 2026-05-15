@@ -209,21 +209,29 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer = Players.LocalPlayer or Players.PlayerAdded:Wait()
 local FishingState = State.Fishing
 local FishingSpotPosition = Vector3.new(1768.35, 3.03, -1398.29)
+local FishingHotspotSafeDropPosition = Vector3.new(1792.59, 3.03, -1391.74)
 local FishingCastCFrame = CFrame.new(1743.9234619140625, -5.975002288818359, -1410.97705078125, -0, 1, -0, -0, 0, -1, -1, 0, -0)
 local FishingCastRotation = CFrame.new(0, 0, 0, -0, 1, -0, -0, 0, -1, -1, 0, -0)
 local FishingAttackAlpha = 1
 local FishingAttackResponseTime = 0
 local FishingCastAttackDelay = 0
-local FishingAutoCastInterval = 1
-local FishingAutoCatchPollDelay = 0.02
+local FishingAutoCastInterval = 0.6
+local FishingAutoCatchPollDelay = 0.05
 local FishingPreCastRecallDelay = 0
 local FishingPostCatchCastDelay = 0.65
 local FishingLineLandDelay = 0.48
+local FishingHotspotLandingPadding = 0.38
+local FishingHotspotMaxLandDelay = 4
+local FishingHotspotFolderScanInterval = 2
+local FishingHotspotStandHeight = 9
+local FishingHotspotSafeDropSpacing = 2
+local FishingHotspotSafeDropIgnoreRadius = 12
+local FishingHotspotLootMoveDelay = 0.08
 local FishingReelWaitTimeout = 6
 local FishingReelPollDelay = 0.04
-local FishingReelHitRepeats = 64
-local FishingReelHitBatchSize = 16
-local FishingReelEndRepeats = 2
+local FishingReelHitRepeats = 14
+local FishingReelHitBatchSize = 4
+local FishingReelEndRepeats = 1
 local FishingCatchingSettleDelay = 0.015
 local FishingPostReelDelay = 0.005
 local FishingCycleDelay = 0.005
@@ -240,13 +248,21 @@ local FishingSellCenterBiasScale = 0.18
 local FishingSellMaxGridOffset = 1.8
 local FishingSellMoveRepeats = 12
 local FishingSellStepDelay = 0.004
-local FishingSellSettleDelay = 0.12
-local FishingSellDealRepeats = 3
+local FishingStoreMoveRepeats = 1
+local FishingStoreStepDelay = 0
+local FishingSellSettleDelay = 0.05
+local FishingSellDealRepeats = 2
+local FishingSellDealDelay = 0.04
 local FishingHoverMover = nil
 local getCatchParts
+local moveHotspotCatchesToSafeSpot
 local LastFishingCatchAt = 0
+local LastFishingCastLandDelay = FishingLineLandDelay
+local LastFishingCastUsedHotspot = false
 local LastFishingHotspotWarning = 0
 local FishingHotspotWarningCooldown = 4
+local LastFishingHotspotFolderScanAt = 0
+local FishingHotspotFolderCache = {}
 
 local function mainNotify(description)
     Library:Notify({
@@ -590,81 +606,170 @@ local function canContinueFishing(singleRun)
         and not FishingState.StopRequested
 end
 
-local function getFishingHotspotFolder()
-    local mouseIgnore = workspace:FindFirstChild("MouseIgnore")
-        or workspace:FindFirstChild("Mouseignore")
-        or workspace:FindFirstChild("Mouseignore", true)
-        or workspace:FindFirstChild("MouseIgnore", true)
+local function getFishingHotspotFolders()
+    local now = os.clock()
+    local cachedFolders = {}
 
-    return mouseIgnore and mouseIgnore:FindFirstChild("FishHotspots") or nil
+    for _, folder in ipairs(FishingHotspotFolderCache) do
+        if folder and folder:IsDescendantOf(workspace) then
+            cachedFolders[#cachedFolders + 1] = folder
+        end
+    end
+
+    if #cachedFolders > 0 and now - LastFishingHotspotFolderScanAt < FishingHotspotFolderScanInterval then
+        return cachedFolders
+    end
+
+    local folders = {}
+    local seen = {}
+
+    local function addFolder(folder)
+        if folder and folder.Name == "FishHotspots" and not seen[folder] then
+            seen[folder] = true
+            folders[#folders + 1] = folder
+        end
+    end
+
+    local mouseIgnore = workspace:FindFirstChild("MouseIgnore") or workspace:FindFirstChild("Mouseignore")
+    addFolder(mouseIgnore and mouseIgnore:FindFirstChild("FishHotspots"))
+
+    for _, object in ipairs(workspace:GetDescendants()) do
+        if object.Name == "FishHotspots" then
+            addFolder(object)
+        end
+    end
+
+    LastFishingHotspotFolderScanAt = now
+    FishingHotspotFolderCache = folders
+    return folders
 end
 
-local function getFishingHotspotPosition(hotspot)
+local function getFishingHotspotParts(hotspot)
+    local parts = {}
+    local seen = {}
+
+    local function addPart(part)
+        if part and part:IsA("BasePart") and not seen[part] then
+            seen[part] = true
+            parts[#parts + 1] = part
+        end
+    end
+
     if not hotspot then
-        return nil
+        return parts
     end
 
     if hotspot:IsA("BasePart") then
-        return hotspot.Position
+        addPart(hotspot)
+        return parts
     end
 
-    local hitbox = hotspot:FindFirstChild("Hitbox", true)
-    if hitbox and hitbox:IsA("BasePart") then
-        return hitbox.Position
+    addPart(hotspot:FindFirstChild("Hitbox"))
+
+    for _, child in ipairs(hotspot:GetChildren()) do
+        addPart(child)
     end
 
-    local part = hotspot:FindFirstChildWhichIsA("BasePart", true)
-    if part then
-        return part.Position
+    for _, child in ipairs(hotspot:GetDescendants()) do
+        addPart(child)
     end
 
-    return getMainPosition(hotspot)
+    return parts
+end
+
+local function positionHitsFishingHotspot(position, folder)
+    if not position or not folder then
+        return false
+    end
+
+    for _, part in ipairs(workspace:GetPartBoundsInBox(CFrame.new(position), Vector3.new(1, 1, 1))) do
+        local parent = part.Parent
+
+        if parent and parent.Parent == folder then
+            return true
+        end
+    end
+
+    return false
+end
+
+local function getFishingHotspotCastPosition(hotspot, folder)
+    local fallbackPosition = nil
+
+    for _, part in ipairs(getFishingHotspotParts(hotspot)) do
+        fallbackPosition = fallbackPosition or part.Position
+
+        if positionHitsFishingHotspot(part.Position, folder) then
+            return part.Position
+        end
+    end
+
+    return fallbackPosition or getMainPosition(hotspot)
 end
 
 local function getBestFishingHotspot()
-    local folder = getFishingHotspotFolder()
-
-    if not folder then
-        return nil
-    end
-
-    local root = getMainRoot()
-    local rootPosition = root and root.Position
     local bestHotspot = nil
     local bestPosition = nil
     local bestDistance = math.huge
 
-    for _, hotspot in ipairs(folder:GetChildren()) do
-        local position = getFishingHotspotPosition(hotspot)
+    for _, folder in ipairs(getFishingHotspotFolders()) do
+        for _, hotspot in ipairs(folder:GetChildren()) do
+            local position = getFishingHotspotCastPosition(hotspot, folder)
 
-        if position then
-            local distance = rootPosition and (position - rootPosition).Magnitude or 0
+            if position then
+                local distance = (position - FishingSpotPosition).Magnitude
 
-            if distance < bestDistance then
-                bestDistance = distance
-                bestHotspot = hotspot
-                bestPosition = position
+                if distance < bestDistance then
+                    bestDistance = distance
+                    bestHotspot = hotspot
+                    bestPosition = position
+                end
             end
         end
     end
 
-    return bestHotspot, bestPosition
+    return bestHotspot, bestPosition, bestDistance
+end
+
+local function getFishingCastLandDelay(standPosition, castPosition)
+    if not standPosition or not castPosition then
+        return FishingLineLandDelay
+    end
+
+    local distance = (standPosition - castPosition).Magnitude
+    return math.clamp((distance / 50) + FishingHotspotLandingPadding, FishingLineLandDelay, FishingHotspotMaxLandDelay)
+end
+
+local function getFishingHotspotStandPosition(hotspotPosition)
+    if not hotspotPosition then
+        return nil
+    end
+
+    return Vector3.new(
+        hotspotPosition.X,
+        math.max(FishingSpotPosition.Y, hotspotPosition.Y + FishingHotspotStandHeight),
+        hotspotPosition.Z
+    )
 end
 
 local function getFishingCastData()
-    local _, hotspotPosition = nil, nil
+    local _, hotspotPosition, hotspotDistance = nil, nil, nil
 
     if FishingState.UseHotspots then
-        _, hotspotPosition = getBestFishingHotspot()
+        _, hotspotPosition, hotspotDistance = getBestFishingHotspot()
     end
 
     if hotspotPosition then
-        return FishingSpotPosition,
+        local standPosition = getFishingHotspotStandPosition(hotspotPosition)
+
+        return standPosition,
             CFrame.new(hotspotPosition) * FishingCastRotation,
-            true
+            true,
+            getFishingCastLandDelay(standPosition, hotspotPosition),
+            hotspotDistance
     end
 
-    return FishingSpotPosition, FishingCastCFrame, false
+    return FishingSpotPosition, FishingCastCFrame, false, FishingLineLandDelay
 end
 
 local function warnNoFishingHotspot()
@@ -759,13 +864,16 @@ local function castFishingLine(forceRecall)
         return false
     end
 
-    local standPosition, castCFrame = getFishingCastData()
+    local standPosition, castCFrame, usedHotspot, landDelay = getFishingCastData()
 
     if not standPosition or not castCFrame then
         warnNoFishingHotspot()
         stopFishingHover()
         return false
     end
+
+    LastFishingCastLandDelay = landDelay or FishingLineLandDelay
+    LastFishingCastUsedHotspot = usedHotspot == true
 
     if not holdFishingPosition(standPosition) then
         mainNotify("Character root was not found.")
@@ -811,14 +919,20 @@ local function runFishingCycle(singleRun)
         return false
     end
 
-    task.wait(FishingLineLandDelay)
+    task.wait(LastFishingCastLandDelay)
 
     if not waitForFishingReel(singleRun) then
         recallFishingLine()
         return false
     end
 
-    return triggerFishingCatchFromAttribute(reelHitRemote, reelEndRemote, singleRun)
+    local caught = triggerFishingCatchFromAttribute(reelHitRemote, reelEndRemote, singleRun)
+
+    if caught and LastFishingCastUsedHotspot then
+        moveHotspotCatchesToSafeSpot()
+    end
+
+    return caught
 end
 
 local function getNauticSellary()
@@ -1097,6 +1211,19 @@ local function isCatchHeld(entry)
         )
 end
 
+local function isCatchNearMainCharacter(entry, radius)
+    if isCatchHeld(entry) then
+        return true
+    end
+
+    local root = getMainRoot()
+    local position = entry and (getMainPosition(entry.Root) or getMainPosition(entry.Part))
+
+    return root
+        and position
+        and (position - root.Position).Magnitude <= radius
+end
+
 local function isCatchInsideMainPlot(entry)
     if not entry then
         return false
@@ -1125,7 +1252,7 @@ local function hasHeldFishingCatch()
     return false
 end
 
-local function moveCatchToSell(entry, destination)
+local function moveCatchToSell(entry, destination, repeats, stepDelay)
     local grabHandler = getGrabHandlerRemote()
 
     if not grabHandler or not entry or not entry.Part or not destination then
@@ -1143,16 +1270,80 @@ local function moveCatchToSell(entry, destination)
     end
 
     local moved = mainCallRemote(grabHandler, part, "Grab", startPosition)
+    repeats = repeats or FishingSellMoveRepeats
+    stepDelay = stepDelay or FishingSellStepDelay
 
-    for _ = 1, FishingSellMoveRepeats do
+    for _ = 1, repeats do
         setCatchAt(part, root, destination)
         moved = mainCallRemote(grabHandler, part, "Grab", destination) or moved
-        task.wait(FishingSellStepDelay)
+
+        if stepDelay > 0 then
+            task.wait(stepDelay)
+        end
     end
 
     mainCallRemote(grabHandler, part, "Ungrab")
     setCatchAt(part, root, destination)
     return moved
+end
+
+local function fastMoveCatchToSell(entry, destination)
+    local grabHandler = getGrabHandlerRemote()
+
+    if not grabHandler or not entry or not entry.Part or not destination then
+        return false
+    end
+
+    local part = entry.Part
+    local root = entry.Root
+    detachCatchLocal(root)
+    setCatchAt(part, root, destination)
+
+    local moved = mainCallRemote(grabHandler, part, "Grab", destination)
+    mainCallRemote(grabHandler, part, "Ungrab")
+    setCatchAt(part, root, destination)
+    return moved
+end
+
+local function getFishingHotspotSafeDropPosition(slot)
+    local index = slot - 1
+    local gridSize = 4
+    local column = (index % gridSize) - ((gridSize - 1) / 2)
+    local row = (math.floor(index / gridSize) % gridSize) - ((gridSize - 1) / 2)
+    local layer = math.floor(index / (gridSize * gridSize))
+
+    return Vector3.new(
+        FishingHotspotSafeDropPosition.X + column * FishingHotspotSafeDropSpacing,
+        FishingHotspotSafeDropPosition.Y + 0.75 + math.min(layer * 0.3, 1.5),
+        FishingHotspotSafeDropPosition.Z + row * FishingHotspotSafeDropSpacing
+    )
+end
+
+local function isCatchNearFishingHotspotSafeDrop(entry)
+    local position = entry and (getMainPosition(entry.Root) or getMainPosition(entry.Part))
+    return position
+        and (position - FishingHotspotSafeDropPosition).Magnitude <= FishingHotspotSafeDropIgnoreRadius
+end
+
+moveHotspotCatchesToSafeSpot = function()
+    task.wait(FishingHotspotLootMoveDelay)
+
+    local moved = 0
+
+    for _, entry in ipairs(getCatchParts(true)) do
+        if not isCatchInsideMainPlot(entry)
+            and not isCatchNearFishingHotspotSafeDrop(entry)
+            and isCatchNearMainCharacter(entry, FishingOwnedGrabScanRadius)
+        then
+            local destination = getFishingHotspotSafeDropPosition(moved + 1)
+
+            if fastMoveCatchToSell(entry, destination) then
+                moved = moved + 1
+            end
+        end
+    end
+
+    return moved > 0
 end
 
 local function dropHeldFishCatchAt(position)
@@ -1217,6 +1408,31 @@ local function isFishingValuableLoot(entry)
     return false
 end
 
+local function isFishingSellCandidate(entry)
+    if not entry or isCatchInsideMainPlot(entry) or isFishingValuableLoot(entry) then
+        return false
+    end
+
+    if isCatchHeld(entry) or hasCatchTag(entry.Root) or hasCatchTag(entry.Part) then
+        return true
+    end
+
+    local root = getMainRoot()
+    local position = getMainPosition(entry.Root) or getMainPosition(entry.Part)
+
+    if not root or not position or (position - root.Position).Magnitude > FishingOwnedGrabScanRadius then
+        return false
+    end
+
+    local names = getLootNameCandidates(entry)
+
+    if names.MaterialPart then
+        return false
+    end
+
+    return true
+end
+
 local function storeFishCatchesAtBase(filterFn)
     if not getMainPlotDropPosition(1) then
         finishFishingAtBase()
@@ -1232,10 +1448,10 @@ local function storeFishCatchesAtBase(filterFn)
     local moved = 0
 
     for _, entry in ipairs(catches) do
-        if filterFn and filterFn(entry) then
+        if filterFn and filterFn(entry) and not isCatchInsideMainPlot(entry) then
             local destination = getMainPlotDropPosition(moved + 1)
 
-            if destination and moveCatchToSell(entry, destination) then
+            if destination and moveCatchToSell(entry, destination, FishingStoreMoveRepeats, FishingStoreStepDelay) then
                 moved = moved + 1
             end
         end
@@ -1252,7 +1468,7 @@ local function sellFishCatches()
         return 0
     end
 
-    local catches = getCatchParts(false)
+    local catches = getCatchParts(true)
 
     if #catches == 0 then
         mainNotify("No caught fish found.")
@@ -1262,17 +1478,17 @@ local function sellFishCatches()
     local moved = 0
 
     for _, entry in ipairs(catches) do
-        if not isCatchInsideMainPlot(entry) then
+        if isFishingSellCandidate(entry) then
             local destination = getFishSellDropPosition(moved + 1)
 
-            if destination and moveCatchToSell(entry, destination) then
+            if destination and fastMoveCatchToSell(entry, destination) then
                 moved = moved + 1
             end
         end
     end
 
     if moved <= 0 then
-        mainNotify("No fish were moved.")
+        mainNotify("No fish around you to sell.")
         return 0
     end
 
@@ -1283,7 +1499,7 @@ local function sellFishCatches()
     if interact then
         for _ = 1, FishingSellDealRepeats do
             mainCallRemote(interact, "Deal", 1)
-            task.wait(0.08)
+            task.wait(FishingSellDealDelay)
         end
 
         mainNotify("Fish sold successfully.")
@@ -1304,6 +1520,8 @@ TalentsBox:AddButton({
 })
 
 local FishingBox = Tabs.Main:AddLeftGroupbox("Fishing", "fish")
+
+FishingBox:AddLabel("⚠ High ping may affect farm.")
 
 FishingBox:AddButton({
     Text = "Fish once",
@@ -1403,6 +1621,10 @@ Toggles.FishingAutoFish:OnChanged(function(enabled)
                 if reelHitRemote and reelEndRemote and isFishingCatchingActive() then
                     local caught = triggerFishingCatchFromAttribute(reelHitRemote, reelEndRemote, false)
 
+                    if caught and LastFishingCastUsedHotspot then
+                        moveHotspotCatchesToSafeSpot()
+                    end
+
                     if caught and FishingState.AutoSell then
                         task.spawn(function()
                             task.wait(FishingSellAfterCatchDelay)
@@ -1431,7 +1653,7 @@ Toggles.FishingAutoFish:OnChanged(function(enabled)
                 end
 
                 local cycleOk = ok and result == true
-                task.wait(cycleOk and FishingAutoCastInterval or FishingIdleDelay)
+                task.wait(cycleOk and math.max(FishingAutoCastInterval, LastFishingCastLandDelay) or FishingIdleDelay)
             end
         end
 
