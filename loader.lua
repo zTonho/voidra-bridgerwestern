@@ -149,6 +149,7 @@ local State = {
     Fishing = {
         AutoFish = false,
         AutoSell = false,
+        SpotCoordinates = "",
         UseHotspots = false,
         StopRequested = false,
     },
@@ -220,6 +221,12 @@ local FishingAutoCatchPollDelay = 0.08
 local FishingPreCastRecallDelay = 0
 local FishingPostCatchCastDelay = 0.65
 local FishingLineLandDelay = 0.48
+local FishingCastScanHeight = 35
+local FishingCastScanDepth = 145
+local FishingCastScanCacheDuration = 2
+local FishingCastScanAfterTeleportDelay = 0.25
+local FishingCastScanDistances = { 10, 16, 24, 34, 46, 60 }
+local FishingCastScanSideOffsets = { 0, -8, 8, -18, 18 }
 local FishingHotspotLandingPadding = 0.38
 local FishingHotspotMaxLandDelay = 4
 local FishingHotspotFolderScanInterval = 2
@@ -272,6 +279,9 @@ local LastFishingHotspotWarning = 0
 local FishingHotspotWarningCooldown = 4
 local LastFishingHotspotFolderScanAt = 0
 local FishingHotspotFolderCache = {}
+local LastFishingCastScanAt = 0
+local LastFishingCastScanKey = nil
+local LastFishingCastScanCFrame = nil
 
 local function mainNotify(description)
     Library:Notify({
@@ -761,6 +771,236 @@ local function getFishingHotspotStandPosition(hotspotPosition)
     )
 end
 
+local function parseFishingCoordinates(text)
+    local numbers = {}
+
+    for value in tostring(text):gmatch("[-+]?%d*%.?%d+") do
+        numbers[#numbers + 1] = tonumber(value)
+    end
+
+    if #numbers < 3 then
+        return nil
+    end
+
+    return Vector3.new(numbers[1], numbers[2], numbers[3])
+end
+
+local function formatFishingCoordinates(position)
+    return string.format("%.2f, %.2f, %.2f", position.X, position.Y, position.Z)
+end
+
+local function getSavedFishingSpot()
+    return parseFishingCoordinates(FishingState.SpotCoordinates)
+end
+
+local FishingFishableNameHints = {
+    "water",
+    "ocean",
+    "pond",
+    "river",
+    "lake",
+    "sea",
+    "fishhotspot",
+    "fish hotspot",
+    "fishzone",
+    "fish zone",
+    "fishing",
+    "lava",
+    "magma",
+    "sarcophagus",
+    "sarc",
+}
+
+local function instanceTreeHasNameHint(instance, hints)
+    local current = instance
+
+    while current and current ~= game do
+        local name = current.Name and current.Name:lower() or ""
+
+        for _, hint in ipairs(hints) do
+            if name:find(hint, 1, true) then
+                return true
+            end
+        end
+
+        current = current.Parent
+    end
+
+    return false
+end
+
+local function isFishableCastInstance(instance, material)
+    if material == Enum.Material.Water then
+        return true
+    end
+
+    local grabFolder = workspace:FindFirstChild("Grab")
+
+    if grabFolder and instance and instance:IsDescendantOf(grabFolder) then
+        return false
+    end
+
+    local model = instance and instance:FindFirstAncestorOfClass("Model")
+
+    if model and Players:GetPlayerFromCharacter(model) then
+        return false
+    end
+
+    return instance ~= nil and instanceTreeHasNameHint(instance, FishingFishableNameHints)
+end
+
+local function getFishingRaycastParams()
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.IgnoreWater = false
+
+    local character = getMainCharacter()
+    params.FilterDescendantsInstances = character and { character } or {}
+
+    return params
+end
+
+local function getFishingOverlapParams()
+    local params = OverlapParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+
+    local character = getMainCharacter()
+    params.FilterDescendantsInstances = character and { character } or {}
+
+    return params
+end
+
+local function addFishingScanDirection(directions, direction)
+    local flat = Vector3.new(direction.X, 0, direction.Z)
+
+    if flat.Magnitude < 0.05 then
+        return
+    end
+
+    flat = flat.Unit
+
+    for _, existing in ipairs(directions) do
+        if existing:Dot(flat) > 0.98 then
+            return
+        end
+    end
+
+    directions[#directions + 1] = flat
+end
+
+local function getDefaultFishingCastDirection()
+    local diff = FishingCastCFrame.Position - FishingSpotPosition
+    return Vector3.new(diff.X, 0, diff.Z)
+end
+
+local function getFishingScanDirections()
+    local directions = {}
+    local root = getMainRoot()
+
+    if root then
+        addFishingScanDirection(directions, root.CFrame.LookVector)
+    end
+
+    addFishingScanDirection(directions, getDefaultFishingCastDirection())
+
+    for angle = 0, 315, 45 do
+        local radians = math.rad(angle)
+        addFishingScanDirection(directions, Vector3.new(math.cos(radians), 0, math.sin(radians)))
+    end
+
+    return directions
+end
+
+local function findFishablePartNear(position, overlapParams)
+    local ok, parts = pcall(function()
+        return workspace:GetPartBoundsInBox(CFrame.new(position), Vector3.new(8, 10, 8), overlapParams)
+    end)
+
+    if not ok or not parts then
+        return nil
+    end
+
+    for _, part in ipairs(parts) do
+        if part:IsA("BasePart") and isFishableCastInstance(part, nil) then
+            return Vector3.new(position.X, part.Position.Y, position.Z)
+        end
+    end
+
+    return nil
+end
+
+local function getFishingCastScanKey(standPosition)
+    return string.format("%.1f:%.1f:%.1f", standPosition.X, standPosition.Y, standPosition.Z)
+end
+
+local function scanFishingCastCFrame(standPosition, allowFallback)
+    local key = getFishingCastScanKey(standPosition)
+    local now = os.clock()
+
+    if LastFishingCastScanKey == key and now - LastFishingCastScanAt < FishingCastScanCacheDuration then
+        return LastFishingCastScanCFrame ~= false and LastFishingCastScanCFrame or nil
+    end
+
+    local raycastParams = getFishingRaycastParams()
+    local overlapParams = getFishingOverlapParams()
+    local foundPosition = nil
+
+    for _, direction in ipairs(getFishingScanDirections()) do
+        local right = Vector3.new(direction.Z, 0, -direction.X)
+
+        if right.Magnitude < 0.05 then
+            right = Vector3.new(1, 0, 0)
+        else
+            right = right.Unit
+        end
+
+        for _, distance in ipairs(FishingCastScanDistances) do
+            for _, sideOffset in ipairs(FishingCastScanSideOffsets) do
+                local sample = standPosition + (direction * distance) + (right * sideOffset)
+                local origin = sample + Vector3.new(0, FishingCastScanHeight, 0)
+                local result = workspace:Raycast(origin, Vector3.new(0, -FishingCastScanDepth, 0), raycastParams)
+
+                if result and isFishableCastInstance(result.Instance, result.Material) then
+                    foundPosition = result.Position
+                    break
+                end
+
+                local overlapPosition = findFishablePartNear(result and result.Position or sample, overlapParams)
+
+                if overlapPosition then
+                    foundPosition = overlapPosition
+                    break
+                end
+            end
+
+            if foundPosition then
+                break
+            end
+        end
+
+        if foundPosition then
+            break
+        end
+    end
+
+    local castCFrame = foundPosition and (CFrame.new(foundPosition) * FishingCastRotation) or nil
+
+    if not castCFrame and allowFallback then
+        castCFrame = FishingCastCFrame
+    end
+
+    if castCFrame then
+        LastFishingCastScanKey = key
+        LastFishingCastScanAt = now
+        LastFishingCastScanCFrame = castCFrame
+    else
+        LastFishingCastScanKey = nil
+        LastFishingCastScanCFrame = nil
+    end
+
+    return castCFrame
+end
+
 local function getFishingCastData()
     local _, hotspotPosition, hotspotDistance = nil, nil, nil
 
@@ -778,7 +1018,18 @@ local function getFishingCastData()
             hotspotDistance
     end
 
-    return FishingSpotPosition, FishingCastCFrame, false, FishingLineLandDelay
+    local savedSpot = getSavedFishingSpot()
+    local standPosition = savedSpot or FishingSpotPosition
+    local castCFrame = scanFishingCastCFrame(standPosition, savedSpot == nil)
+
+    if not castCFrame then
+        return standPosition, nil, false, FishingLineLandDelay
+    end
+
+    return standPosition,
+        castCFrame,
+        false,
+        getFishingCastLandDelay(standPosition, castCFrame.Position)
 end
 
 local function warnNoFishingHotspot()
@@ -789,7 +1040,7 @@ local function warnNoFishingHotspot()
     end
 
     LastFishingHotspotWarning = now
-    mainNotify("No fish hotspot found.")
+    mainNotify("No fishable water/lava found near spot.")
 end
 
 local function isFishingCatchingActive()
@@ -880,6 +1131,11 @@ local function castFishingLine(forceRecall)
     end
 
     local standPosition, castCFrame, usedHotspot, landDelay = getFishingCastData()
+
+    if standPosition and not castCFrame and holdFishingPosition(standPosition) then
+        task.wait(FishingCastScanAfterTeleportDelay)
+        standPosition, castCFrame, usedHotspot, landDelay = getFishingCastData()
+    end
 
     if not standPosition or not castCFrame then
         warnNoFishingHotspot()
@@ -1568,6 +1824,62 @@ local FishingBox = Tabs.Main:AddLeftGroupbox("Fishing", "fish")
 
 FishingBox:AddLabel("⚠ High ping may affect farm.")
 
+FishingBox:AddDivider("Spot")
+FishingBox:AddInput("FishingSpotCoordinates", {
+    Text = "Saved spot",
+    Placeholder = "X, Y, Z",
+    Default = FishingState.SpotCoordinates,
+    Finished = false,
+    ClearTextOnFocus = false,
+})
+
+FishingBox:AddButton({
+    Text = "Save fish spot",
+    Func = function()
+        local root = getMainRoot()
+
+        if not root then
+            mainNotify("Character root was not found.")
+            return
+        end
+
+        local text = formatFishingCoordinates(root.Position)
+        FishingState.SpotCoordinates = text
+        Options.FishingSpotCoordinates:SetValue(text)
+        mainNotify("Fishing spot saved.")
+    end,
+})
+
+FishingBox:AddButton({
+    Text = "TP to fish spot",
+    Func = function()
+        local position = getSavedFishingSpot()
+
+        if not position then
+            mainNotify("Save a fishing spot first.")
+            return
+        end
+
+        if setMainCharacterAt(position) then
+            mainNotify("Teleported to fishing spot.")
+        else
+            mainNotify("Character root was not found.")
+        end
+    end,
+})
+
+FishingBox:AddButton({
+    Text = "Clear fish spot",
+    Func = function()
+        FishingState.SpotCoordinates = ""
+        Options.FishingSpotCoordinates:SetValue("")
+        LastFishingCastScanKey = nil
+        LastFishingCastScanCFrame = nil
+        mainNotify("Fishing spot cleared.")
+    end,
+})
+
+FishingBox:AddDivider("Farm")
 FishingBox:AddButton({
     Text = "Fish once",
     Func = function()
@@ -1631,6 +1943,12 @@ FishingBox:AddToggle("FishingAutoSell", {
 
 local fishingLoopRunning = false
 local fishingCatchLoopRunning = false
+
+Options.FishingSpotCoordinates:OnChanged(function(value)
+    FishingState.SpotCoordinates = value or ""
+    LastFishingCastScanKey = nil
+    LastFishingCastScanCFrame = nil
+end)
 
 Toggles.FishingUseHotspots:OnChanged(function(enabled)
     if enabled and not FishingAllowHotspotTeleport then
