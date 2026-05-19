@@ -1,6 +1,15 @@
 local Repo = "https://raw.githubusercontent.com/zTonho/voidra-bridgerwestern/refs/heads/dev-test/"
 local ObsidianRepo = "https://raw.githubusercontent.com/deividcomsono/Obsidian/refs/heads/main/"
 local ScriptFolderName = "voidra"
+local HubVersion = "0.1.0-beta"
+local TargetGameName = "Refinery Caves 2"
+local HubCredits = "zz.tonho"
+local OfficialDiscord = "https://discord.gg/r8P7wXwv"
+local SupportedExecutors = {
+    { Name = "Wave", Link = "https://discord.gg/6WHjYVAPa", Status = "Supported" },
+    { Name = "Synapse Z", Link = "https://discord.gg/synz", Status = "Supported" },
+    { Name = "Volt", Link = "https://discord.gg/voltbz", Status = "Supported" },
+}
 local CacheToken = tostring(os.time())
 
 local function fetchFrom(repo, path)
@@ -136,6 +145,7 @@ local Window = Library:CreateWindow({
 })
 
 local Tabs = {
+    Info = Window:AddTab("Info", "info"),
     Main = Window:AddTab("Main", "house"),
     Mining = Window:AddTab("Ores", "pickaxe"),
     Autobuy = Window:AddTab("Autobuy", "shopping-cart"),
@@ -202,6 +212,324 @@ MenuBox:AddButton({
         end
     end,
 })
+
+local InfoOk, InfoError = pcall(function()
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local Stats = game:GetService("Stats")
+local LocalPlayer = Players.LocalPlayer or Players.PlayerAdded:Wait()
+local InfoStartedAt = os.clock()
+local InfoLastFpsUpdate = os.clock()
+local InfoFrameCount = 0
+local CurrentFps = 0
+local LoadstringText = ('loadstring(game:HttpGet("%sloader.lua"))()'):format(Repo)
+
+local function notifyInfo(description)
+    Library:Notify({
+        Title = "voidra",
+        Description = description,
+        Time = 3,
+    })
+end
+
+local function copyText(text, successMessage)
+    if type(setclipboard) == "function" then
+        local ok = pcall(setclipboard, text)
+
+        if ok then
+            notifyInfo(successMessage or "Copied to clipboard.")
+            return true
+        end
+    end
+
+    notifyInfo(text)
+    return false
+end
+
+local function formatDuration(seconds)
+    seconds = math.max(0, math.floor(seconds or 0))
+    local hours = math.floor(seconds / 3600)
+    local minutes = math.floor((seconds % 3600) / 60)
+    local secs = seconds % 60
+
+    if hours > 0 then
+        return ("%02d:%02d:%02d"):format(hours, minutes, secs)
+    end
+
+    return ("%02d:%02d"):format(minutes, secs)
+end
+
+local function safeValue(callback, fallback)
+    local ok, result = pcall(callback)
+
+    if ok and result ~= nil and result ~= "" then
+        return result
+    end
+
+    return fallback or "Unavailable"
+end
+
+local function getExecutorName()
+    if type(identifyexecutor) == "function" then
+        local ok, name, version = pcall(identifyexecutor)
+
+        if ok and name then
+            return version and ("%s %s"):format(tostring(name), tostring(version)) or tostring(name)
+        end
+    end
+
+    if type(getexecutorname) == "function" then
+        local ok, name = pcall(getexecutorname)
+
+        if ok and name then
+            return tostring(name)
+        end
+    end
+
+    return "Unknown"
+end
+
+local function getStatsValueString(hints)
+    local performanceStats = Stats:FindFirstChild("PerformanceStats")
+
+    if not performanceStats then
+        return "Unavailable"
+    end
+
+    for _, stat in ipairs(performanceStats:GetChildren()) do
+        local lowerName = stat.Name:lower()
+
+        for _, hint in ipairs(hints) do
+            if lowerName:find(hint, 1, true) then
+                local ok, value = pcall(function()
+                    return stat:GetValueString()
+                end)
+
+                if ok and value then
+                    return tostring(value)
+                end
+            end
+        end
+    end
+
+    return "Unavailable"
+end
+
+local function getMemoryUsage()
+    return safeValue(function()
+        return ("%.1f MB"):format(Stats:GetTotalMemoryUsageMb())
+    end)
+end
+
+local function getClipboardStatus()
+    return type(setclipboard) == "function" and "Available" or "Unavailable"
+end
+
+local function getHttpStatus()
+    local ok, httpGet = pcall(function()
+        return game.HttpGet
+    end)
+
+    return ok and type(httpGet) == "function" and "Available" or "Unknown"
+end
+
+local function getLoadstringStatus()
+    return type(loadstring) == "function" and "Available" or "Unavailable"
+end
+
+local function getUserSummary()
+    return table.concat({
+        ("Username: %s"):format(LocalPlayer.Name),
+        ("Display name: %s"):format(LocalPlayer.DisplayName),
+        ("UserId: %s"):format(tostring(LocalPlayer.UserId)),
+        ("Account age: %s days"):format(tostring(LocalPlayer.AccountAge)),
+        ("Membership: %s"):format(tostring(LocalPlayer.MembershipType):gsub("Enum.MembershipType.", "")),
+        ("Team: %s"):format(LocalPlayer.Team and LocalPlayer.Team.Name or "None"),
+    }, "\n")
+end
+
+local function getGameSummary()
+    return table.concat({
+        ("Game: %s"):format(TargetGameName),
+        ("Hub version: %s"):format(HubVersion),
+        ("PlaceId: %s"):format(tostring(game.PlaceId)),
+        ("GameId: %s"):format(tostring(game.GameId)),
+        ("Place version: %s"):format(tostring(game.PlaceVersion)),
+        ("CreatorId: %s"):format(tostring(game.CreatorId)),
+    }, "\n")
+end
+
+local function getServerSummary()
+    return table.concat({
+        ("Players: %d/%d"):format(#Players:GetPlayers(), Players.MaxPlayers),
+        ("JobId: %s"):format(game.JobId ~= "" and game.JobId or "Studio/local"),
+        ("Server uptime: %s"):format(formatDuration(workspace.DistributedGameTime)),
+        ("Hub uptime: %s"):format(formatDuration(os.clock() - InfoStartedAt)),
+        ("Local time: %s"):format(os.date("%H:%M:%S")),
+    }, "\n")
+end
+
+local function getPerformanceSummary()
+    return table.concat({
+        ("FPS: %d"):format(CurrentFps),
+        ("Ping: %s"):format(getStatsValueString({ "ping" })),
+        ("Memory: %s"):format(getMemoryUsage()),
+        ("Data receive: %s"):format(getStatsValueString({ "recv", "receive" })),
+        ("Data send: %s"):format(getStatsValueString({ "send" })),
+    }, "\n")
+end
+
+local function getExecutorSummary()
+    return table.concat({
+        ("Executor: %s"):format(getExecutorName()),
+        ("Clipboard: %s"):format(getClipboardStatus()),
+        ("HttpGet: %s"):format(getHttpStatus()),
+        ("loadstring: %s"):format(getLoadstringStatus()),
+        "More executors may work, but only listed executors were marked supported.",
+    }, "\n")
+end
+
+local function getFullInfoSummary()
+    return table.concat({
+        "voidra info",
+        "",
+        getUserSummary(),
+        "",
+        getGameSummary(),
+        "",
+        getServerSummary(),
+        "",
+        getPerformanceSummary(),
+        "",
+        getExecutorSummary(),
+        "",
+        ("Official Discord: %s"):format(OfficialDiscord),
+    }, "\n")
+end
+
+local OverviewBox = Tabs.Info:AddLeftGroupbox("Overview", "info")
+OverviewBox:AddLabel({
+    Text = ("voidra %s\nmade by %s\nTarget game: %s"):format(HubVersion, HubCredits, TargetGameName),
+    DoesWrap = true,
+})
+
+OverviewBox:AddButton({
+    Text = "Copy official Discord",
+    Func = function()
+        copyText(OfficialDiscord, "Official Discord copied.")
+    end,
+})
+
+OverviewBox:AddButton({
+    Text = "Copy loadstring",
+    Func = function()
+        copyText(LoadstringText, "Loadstring copied.")
+    end,
+})
+
+OverviewBox:AddButton({
+    Text = "Copy JobId",
+    Func = function()
+        copyText(game.JobId ~= "" and game.JobId or "Studio/local", "JobId copied.")
+    end,
+})
+
+OverviewBox:AddButton({
+    Text = "Copy PlaceId",
+    Func = function()
+        copyText(tostring(game.PlaceId), "PlaceId copied.")
+    end,
+})
+
+OverviewBox:AddButton({
+    Text = "Copy all info",
+    Func = function()
+        copyText(getFullInfoSummary(), "Info copied.")
+    end,
+})
+
+local PlayerBox = Tabs.Info:AddLeftGroupbox("Player", "user")
+local PlayerInfoLabel = PlayerBox:AddLabel({
+    Text = getUserSummary(),
+    DoesWrap = true,
+})
+
+local GameBox = Tabs.Info:AddLeftGroupbox("Game", "gamepad-2")
+local GameInfoLabel = GameBox:AddLabel({
+    Text = getGameSummary(),
+    DoesWrap = true,
+})
+
+local ServerBox = Tabs.Info:AddRightGroupbox("Server", "server")
+local ServerInfoLabel = ServerBox:AddLabel({
+    Text = getServerSummary(),
+    DoesWrap = true,
+})
+
+local PerformanceBox = Tabs.Info:AddRightGroupbox("Performance", "activity")
+local PerformanceInfoLabel = PerformanceBox:AddLabel({
+    Text = getPerformanceSummary(),
+    DoesWrap = true,
+})
+
+local ExecutorBox = Tabs.Info:AddRightGroupbox("Executor", "terminal")
+local ExecutorInfoLabel = ExecutorBox:AddLabel({
+    Text = getExecutorSummary(),
+    DoesWrap = true,
+})
+
+ExecutorBox:AddDivider("Supported executors")
+
+for _, executor in ipairs(SupportedExecutors) do
+    ExecutorBox:AddButton({
+        Text = ("%s - %s"):format(executor.Name, executor.Status),
+        Func = function()
+            copyText(executor.Link, executor.Name .. " Discord copied.")
+        end,
+    })
+end
+
+ExecutorBox:AddLabel({
+    Text = "Other executors can be compatible, but are not officially tested yet.",
+    DoesWrap = true,
+})
+
+local InfoConnection = RunService.RenderStepped:Connect(function()
+    InfoFrameCount = InfoFrameCount + 1
+    local now = os.clock()
+
+    if now - InfoLastFpsUpdate >= 1 then
+        CurrentFps = math.floor(InfoFrameCount / (now - InfoLastFpsUpdate) + 0.5)
+        InfoFrameCount = 0
+        InfoLastFpsUpdate = now
+
+        PlayerInfoLabel:SetText(getUserSummary())
+        GameInfoLabel:SetText(getGameSummary())
+        ServerInfoLabel:SetText(getServerSummary())
+        PerformanceInfoLabel:SetText(getPerformanceSummary())
+        ExecutorInfoLabel:SetText(getExecutorSummary())
+    end
+end)
+
+local previousCleanup = cleanup
+cleanup = function()
+    previousCleanup()
+
+    if InfoConnection then
+        InfoConnection:Disconnect()
+        InfoConnection = nil
+    end
+end
+end)
+
+if not InfoOk then
+    warn("[voidra] Info setup failed: " .. tostring(InfoError))
+    Library:Notify({
+        Title = "voidra",
+        Description = "Info setup failed. Check console.",
+        Time = 5,
+    })
+end
 
 local MainOk, MainError = pcall(function()
 local CollectionService = game:GetService("CollectionService")
